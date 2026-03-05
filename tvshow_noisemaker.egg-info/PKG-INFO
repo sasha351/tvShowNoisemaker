@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: tvshow-noisemaker
+Version: 1.0.0
+Summary: CLI tool: trim intro/outro from TV show .mp4 episodes and export .mp3 files
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: ffmpeg-python>=0.2.0
+Requires-Dist: librosa>=0.10.0
+Requires-Dist: numpy>=1.24.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.10; extra == "dev"
+
+# tvShowNoisemaker

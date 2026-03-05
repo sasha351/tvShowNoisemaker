@@ -1,1 +1,145 @@
 # tvShowNoisemaker
+
+A Python CLI tool that processes a folder of `.mp4` TV episodes and produces
+trimmed `.mp3` files with intros and outros removed.
+
+---
+
+## Features
+
+- **Batch processing** – point it at a folder; every `.mp4` is processed automatically.
+- **Three detection strategies** (in priority order):
+  1. **Audio fingerprinting** (librosa chroma features) – identifies identical/near-identical intro and outro music shared across episodes.  This is the most accurate method for TV shows and is used by default.
+  2. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
+  3. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
+- **Configurable MP3 bitrate** (default 192 kbps).
+- **Skip + log** – failed or invalid files are skipped and logged; the batch never crashes.
+- **Optional JSON config file** for reproducible runs.
+
+---
+
+## Requirements
+
+- Python ≥ 3.9
+- `ffmpeg` and `ffprobe` on `PATH`
+- Python packages (installed automatically): `librosa`, `numpy`
+
+---
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+Or install from `requirements.txt` without editable mode:
+
+```bash
+pip install -r requirements.txt
+pip install .
+```
+
+---
+
+## Quick Start
+
+```bash
+# Basic usage – auto-detect intros/outros via fingerprinting
+tvshow-noisemaker --input-dir /path/to/episodes --output-dir /path/to/mp3s
+
+# Disable fingerprinting, rely on silence detection only
+tvshow-noisemaker --input-dir ./eps --output-dir ./out --no-fingerprint
+
+# Supply fallback durations when detection is unreliable
+tvshow-noisemaker --input-dir ./eps --output-dir ./out \
+    --intro-duration 90 --outro-duration 30
+
+# Use a config file
+tvshow-noisemaker --input-dir ./eps --output-dir ./out --config config.json
+
+# Custom bitrate + save log
+tvshow-noisemaker --input-dir ./eps --output-dir ./out \
+    --mp3-bitrate 320 --log-file ./run.log
+```
+
+---
+
+## CLI Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--input-dir`, `-i` | *(required)* | Folder containing `.mp4` files |
+| `--output-dir`, `-o` | *(required)* | Destination folder for `.mp3` files (created if absent) |
+| `--intro-duration SECS` | `None` | Fallback intro duration in seconds |
+| `--outro-duration SECS` | `None` | Fallback outro duration in seconds from end |
+| `--mp3-bitrate KBPS` | `192` | MP3 encoding bitrate |
+| `--config FILE` | `None` | Path to JSON config file |
+| `--log-file FILE` | `None` | Write skip/failure log to this file |
+| `--fingerprint` | *(on)* | Use audio fingerprinting (default) |
+| `--no-fingerprint` | – | Disable fingerprinting |
+| `--silence-db DB` | `-40.0` | Silence threshold in dBFS |
+| `--min-silence-len SECS` | `0.5` | Minimum silence duration |
+| `--fingerprint-search-window SECS` | `300` | Seconds from start/end to examine |
+| `--verbose`, `-v` | – | Enable debug logging |
+
+---
+
+## Config File Format
+
+```json
+{
+    "mp3_bitrate": 192,
+    "intro_duration": 90.0,
+    "outro_duration": 30.0,
+    "silence_db": -40.0,
+    "min_silence_len": 0.5,
+    "fingerprint_search_window": 300.0,
+    "timestamps": {
+        "s01e01.mp4": { "intro_end": 88.5, "outro_start": 2610.0 },
+        "s01e02.mp4": { "intro_end": 90.0, "outro_start": 2605.5 }
+    }
+}
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `mp3_bitrate` | int | MP3 bitrate in kbps |
+| `intro_duration` | float | Global fallback intro duration (seconds) |
+| `outro_duration` | float | Global fallback outro duration from end (seconds) |
+| `silence_db` | float | Silence threshold in dBFS |
+| `min_silence_len` | float | Minimum silence gap (seconds) |
+| `fingerprint_search_window` | float | Seconds to examine from start/end |
+| `timestamps` | object | Per-file overrides (filename → `intro_end`/`outro_start`) |
+
+Per-file `timestamps` entries always win over all other detection methods.
+CLI flags override config-file values.
+
+---
+
+## Detection Method Tradeoffs
+
+| Method | Accuracy | Speed | Requirements |
+|---|---|---|---|
+| Audio fingerprinting | ★★★★★ | ★★☆☆☆ (CPU-bound) | ≥ 2 episodes, librosa |
+| Silence detection | ★★★☆☆ | ★★★★★ | ffmpeg |
+| User timestamps | ★★★★★ | ★★★★★ | Manual inspection |
+
+**Recommendation**: Use the default fingerprinting for a full season folder.
+If you only have a single episode, provide `--intro-duration` and
+`--outro-duration` or a `--config` timestamps file.
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+---
+
+## Output
+
+- One `.mp3` per `.mp4`, same filename, written to `--output-dir`.
+- A log file (if `--log-file` is given) listing skipped and failed files.
