@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tvshow-noisemaker"
 version = "1.0.0"
-description = "CLI tool: trim intro/outro from TV show .mp4 episodes and export .mp3 files"
+description = "CLI tool: trim intro/outro from TV show video episodes and export .mp3 files"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "librosa>=0.10.0",
     "numpy>=1.24.0",
+    "static-ffmpeg>=3.0",
 ]
 
 [project.scripts]

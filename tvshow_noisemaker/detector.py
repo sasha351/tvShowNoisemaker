@@ -215,7 +215,7 @@ def detect_by_fingerprinting(
     Parameters
     ----------
     filepaths:
-        Absolute paths to the ``.mp4`` files.
+        Absolute paths to the video files.
     durations:
         Mapping of filepath → duration in seconds (from :func:`get_duration`).
     search_window:

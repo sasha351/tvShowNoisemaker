@@ -1,13 +1,14 @@
 # tvShowNoisemaker
 
-A Python CLI tool that processes a folder of `.mp4` TV episodes and produces
+A Python CLI tool that processes a folder of TV episode video files and produces
 trimmed `.mp3` files with intros and outros removed.
 
 ---
 
 ## Features
 
-- **Batch processing** – point it at a folder; every `.mp4` is processed automatically.
+- **Batch processing** – point it at a folder; every video file is processed automatically.
+- **Wide format support** – accepts `.mp4`, `.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`, `.m4v`, `.ts`, `.mpg`, `.mpeg`, `.3gp`, `.ogv`, `.vob`.
 - **Three detection strategies** (in priority order):
   1. **Audio fingerprinting** (librosa chroma features) – identifies identical/near-identical intro and outro music shared across episodes.  This is the most accurate method for TV shows and is used by default.
   2. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
@@ -21,8 +22,28 @@ trimmed `.mp3` files with intros and outros removed.
 ## Requirements
 
 - Python ≥ 3.9
-- `ffmpeg` and `ffprobe` on `PATH`
-- Python packages (installed automatically): `librosa`, `numpy`
+- **ffmpeg & ffprobe** – required for all audio processing
+- Python packages (installed automatically): `librosa`, `numpy`, `static-ffmpeg`
+
+### ffmpeg
+
+**Automatic (recommended):** `ffmpeg` is bundled via the
+[`static-ffmpeg`](https://pypi.org/project/static-ffmpeg/) Python package,
+which is installed automatically with `pip install`. No extra steps needed –
+the tool will download a platform-appropriate ffmpeg binary on first run.
+
+**Manual (alternative):** If you prefer a system-wide install:
+
+| Platform | Command |
+|---|---|
+| macOS (Homebrew) | `brew install ffmpeg` |
+| Ubuntu / Debian | `sudo apt install ffmpeg` |
+| Fedora | `sudo dnf install ffmpeg` |
+| Windows (Chocolatey) | `choco install ffmpeg` |
+| Windows (Scoop) | `scoop install ffmpeg` |
+
+When both a system `ffmpeg` and the bundled one are available, the system
+installation takes priority.
 
 ---
 
@@ -38,6 +59,9 @@ Or install from `requirements.txt` without editable mode:
 pip install -r requirements.txt
 pip install .
 ```
+
+This will install all dependencies including `static-ffmpeg`, which provides
+`ffmpeg` and `ffprobe` automatically.
 
 ---
 
@@ -68,7 +92,7 @@ tvshow-noisemaker --input-dir ./eps --output-dir ./out \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--input-dir`, `-i` | *(required)* | Folder containing `.mp4` files |
+| `--input-dir`, `-i` | *(required)* | Folder containing video files (mp4, mkv, avi, mov, etc.) |
 | `--output-dir`, `-o` | *(required)* | Destination folder for `.mp3` files (created if absent) |
 | `--intro-duration SECS` | `None` | Fallback intro duration in seconds |
 | `--outro-duration SECS` | `None` | Fallback outro duration in seconds from end |
@@ -141,5 +165,5 @@ pytest
 
 ## Output
 
-- One `.mp3` per `.mp4`, same filename, written to `--output-dir`.
+- One `.mp3` per input video file, same filename, written to `--output-dir`.
 - A log file (if `--log-file` is given) listing skipped and failed files.

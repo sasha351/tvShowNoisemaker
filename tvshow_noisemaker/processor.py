@@ -28,7 +28,7 @@ def process_file(
     Parameters
     ----------
     input_path:
-        Absolute path to the source ``.mp4`` file.
+        Absolute path to the source video file.
     output_path:
         Absolute path for the destination ``.mp3`` file.
     intro_end:
