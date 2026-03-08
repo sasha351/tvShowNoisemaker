@@ -17,8 +17,10 @@ Detection strategy (in priority order)
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -40,19 +42,67 @@ _VIDEO_EXTENSIONS = {
 }
 
 
-def _setup_logging(log_file: Optional[str], verbose: bool) -> logging.Logger:
-    level = logging.DEBUG if verbose else logging.INFO
-    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stdout)]
-    if log_file:
-        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+def _build_log_filename(input_dir: str) -> str:
+    """Build a log filename from the input folder name and current timestamp."""
+    folder_name = Path(input_dir).name or "batch"
+    # Sanitise: keep alphanumeric, hyphens, underscores, dots
+    folder_name = re.sub(r"[^\w\-.]", "_", folder_name)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{folder_name}_{ts}.log"
 
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=handlers,
-    )
-    return logging.getLogger("tvshow_noisemaker")
+
+def _setup_logging(
+    input_dir: str,
+    output_dir: str,
+    log_file: Optional[str],
+    verbose: bool,
+) -> tuple:
+    """Configure logging with separate terminal and file handlers.
+
+    Terminal gets summary-level messages only (WARNING+ by default, or
+    INFO+ with --verbose).  The log file gets everything (DEBUG).
+
+    Returns ``(terminal_logger, file_logger, log_path)``.
+    """
+    # Determine log file path
+    if log_file:
+        log_path = log_file
+    else:
+        log_path = str(Path(output_dir) / _build_log_filename(input_dir))
+
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Root logger: capture everything so child loggers (detector, etc.) are
+    # written to the log file.
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    # Remove any pre-existing handlers (e.g. from repeated test runs)
+    root.handlers.clear()
+
+    # File handler – all detail
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+
+    # Terminal handler – summary only
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(fmt)
+
+    # The "console" logger is used for messages that should appear on screen.
+    # The regular logger writes to the file only.
+    file_log = logging.getLogger("tvshow_noisemaker")
+    file_log.setLevel(logging.DEBUG)
+
+    console_log = logging.getLogger("tvshow_noisemaker.console")
+    console_log.setLevel(logging.DEBUG)
+    console_log.propagate = False          # don't double-write to file via root
+    console_log.addHandler(console)
+    console_log.addHandler(fh)             # also write summary lines to log file
+
+    return console_log, file_log, log_path
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -120,7 +170,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--log-file",
         default=None,
         metavar="FILE",
-        help="Write skip/failure log to this file (in addition to stdout).",
+        help=(
+            "Override the log file path. By default a log file is written to "
+            "the output directory named <input-folder>_<YYYYMMDD_HHMMSS>.log."
+        ),
     )
 
     # Detection strategy
@@ -206,17 +259,26 @@ def _ensure_ffmpeg_on_path(log: logging.Logger) -> bool:
 
 def run(args: argparse.Namespace) -> int:
     """Main processing logic.  Returns an exit code (0 = success)."""
-    log = _setup_logging(args.log_file, getattr(args, "verbose", False))
+    # Create output dir early so we can write the log file there
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    con, log, log_path = _setup_logging(
+        args.input_dir,
+        args.output_dir,
+        args.log_file,
+        getattr(args, "verbose", False),
+    )
 
     # Verify ffmpeg/ffprobe are available before doing any work
-    if not _ensure_ffmpeg_on_path(log):
+    if not _ensure_ffmpeg_on_path(con):
         return 1
 
     # Load and merge config
     try:
         file_data = load_config(args.config)
     except ValueError as exc:
-        log.error("Config error: %s", exc)
+        con.error("Config error: %s", exc)
         return 1
 
     cfg = build_config(args, file_data)
@@ -224,7 +286,7 @@ def run(args: argparse.Namespace) -> int:
     # Gather input files
     input_dir = Path(args.input_dir)
     if not input_dir.is_dir():
-        log.error("input-dir does not exist or is not a directory: %s", input_dir)
+        con.error("input-dir does not exist or is not a directory: %s", input_dir)
         return 1
 
     video_files: List[str] = sorted(
@@ -232,14 +294,11 @@ def run(args: argparse.Namespace) -> int:
         if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS
     )
     if not video_files:
-        log.warning("No video files found in %s", input_dir)
+        con.warning("No video files found in %s", input_dir)
         return 0
 
+    con.info("Found %d video file(s) in %s", len(video_files), input_dir)
     log.info("Found %d video file(s) in %s", len(video_files), input_dir)
-
-    # Create output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Get durations for all files (needed by fingerprinting and outro detection)
     durations: Dict[str, float] = {}
@@ -253,7 +312,8 @@ def run(args: argparse.Namespace) -> int:
     # Fingerprint pass (batch)
     fingerprint_results: Dict[str, Tuple[float, float]] = {}
     if cfg.use_fingerprinting and len(video_files) >= 2:
-        log.info("Running audio fingerprinting across %d episodes\u2026", len(video_files))
+        con.info("Running audio fingerprinting across %d episodes…", len(video_files))
+        log.info("Running audio fingerprinting across %d episodes…", len(video_files))
         try:
             fingerprint_results = detect_by_fingerprinting(
                 video_files,
@@ -273,10 +333,7 @@ def run(args: argparse.Namespace) -> int:
     total_count = len(video_files)
     batch_start = time.monotonic()
 
-    log.info("")
-    log.info("═" * 60)
-    log.info("Starting conversion  (%d files, output → %s)", total_count, output_dir)
-    log.info("═" * 60)
+    con.info("Starting conversion  (%d files, output → %s)", total_count, output_dir)
 
     for idx, filepath in enumerate(video_files, 1):
         basename = Path(filepath).name
@@ -349,40 +406,41 @@ def run(args: argparse.Namespace) -> int:
             _fmt_bytes(out_size),
         )
 
-    # ── Summary ──────────────────────────────────────────────────
+    # ── Summary (printed to both terminal and log file) ──────────
     batch_elapsed = time.monotonic() - batch_start
-    log.info("")
-    log.info("═" * 60)
-    log.info("  SUMMARY")
-    log.info("═" * 60)
-    log.info("  Total files found   : %d", total_count)
-    log.info("  Converted           : %d", len(processed_files))
-    log.info("  Skipped             : %d", len(skipped))
-    log.info("  Failed              : %d", len(failed))
-    log.info("─" * 60)
-    log.info("  Audio kept          : %s", _fmt_duration(total_content_secs))
-    log.info("  Audio trimmed       : %s", _fmt_duration(total_trimmed_secs))
-    log.info("  Total output size   : %s", _fmt_bytes(total_output_bytes))
-    log.info("  MP3 bitrate         : %d kbps", cfg.mp3_bitrate)
-    log.info("  Elapsed time        : %s", _fmt_duration(batch_elapsed))
-    log.info("  Output directory    : %s", output_dir)
-    log.info("═" * 60)
+    con.info("")
+    con.info("═" * 60)
+    con.info("  SUMMARY")
+    con.info("═" * 60)
+    con.info("  Total files found   : %d", total_count)
+    con.info("  Converted           : %d", len(processed_files))
+    con.info("  Skipped             : %d", len(skipped))
+    con.info("  Failed              : %d", len(failed))
+    con.info("─" * 60)
+    con.info("  Audio kept          : %s", _fmt_duration(total_content_secs))
+    con.info("  Audio trimmed       : %s", _fmt_duration(total_trimmed_secs))
+    con.info("  Total output size   : %s", _fmt_bytes(total_output_bytes))
+    con.info("  MP3 bitrate         : %d kbps", cfg.mp3_bitrate)
+    con.info("  Elapsed time        : %s", _fmt_duration(batch_elapsed))
+    con.info("  Output directory    : %s", output_dir)
+    con.info("  Log file            : %s", log_path)
+    con.info("═" * 60)
 
     if skipped:
-        log.info("")
-        log.warning("Skipped files:")
+        con.info("")
+        con.warning("Skipped files:")
         for name, reason in skipped:
-            log.warning("  • %s – %s", name, reason)
+            con.warning("  • %s – %s", name, reason)
 
     if failed:
-        log.info("")
-        log.error("Failed files:")
+        con.info("")
+        con.error("Failed files:")
         for name, reason in failed:
-            log.error("  • %s – %s", name, reason)
+            con.error("  • %s – %s", name, reason)
 
     if not failed and not skipped:
-        log.info("")
-        log.info("All files converted successfully.")
+        con.info("")
+        con.info("All files converted successfully.")
 
     return 1 if failed else 0
 
