@@ -31,6 +31,7 @@ def _make_args(
     silence_db=None,
     min_silence_len=None,
     fingerprint_search_window=None,
+    benchmark_fingerprint=False,
     verbose=False,
 ):
     """Construct a namespace that matches what argparse would produce."""
@@ -48,6 +49,7 @@ def _make_args(
     a.silence_db = silence_db
     a.min_silence_len = min_silence_len
     a.fingerprint_search_window = fingerprint_search_window
+    a.benchmark_fingerprint = benchmark_fingerprint
     a.verbose = verbose
     return a
 
@@ -77,6 +79,11 @@ def test_parser_no_fingerprint_flag():
 def test_parser_custom_bitrate():
     args = _parse("--input-dir /in --output-dir /out --mp3-bitrate 320")
     assert args.mp3_bitrate == 320
+
+
+def test_parser_benchmark_fingerprint_flag():
+    args = _parse("--input-dir /in --output-dir /out --benchmark-fingerprint")
+    assert args.benchmark_fingerprint is True
 
 
 # ---------------------------------------------------------------------------

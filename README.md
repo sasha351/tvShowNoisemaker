@@ -10,7 +10,7 @@ trimmed `.mp3` files with intros and outros removed.
 - **Batch processing** – point it at a folder; every video file is processed automatically.
 - **Wide format support** – accepts `.mp4`, `.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`, `.m4v`, `.ts`, `.mpg`, `.mpeg`, `.3gp`, `.ogv`, `.vob`.
 - **Three detection strategies** (in priority order):
-  1. **Audio fingerprinting** (librosa chroma features) – identifies identical/near-identical intro and outro music shared across episodes.  This is the most accurate method for TV shows and is used by default.
+    1. **Audio fingerprinting** (librosa chroma features) – identifies identical/near-identical intro and outro music from the first 5 episodes. Fingerprinting runs in parallel and caches fingerprints on disk to speed up repeat runs.
   2. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
   3. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
 - **Configurable MP3 bitrate** (default 192 kbps).

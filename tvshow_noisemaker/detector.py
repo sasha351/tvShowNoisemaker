@@ -1,9 +1,9 @@
 """Intro/outro boundary detection for TV episodes.
 
 Detection priority (per batch):
-1. Audio fingerprinting across all episodes (librosa chroma features).
-   Preferred because it finds identical/near-identical segments shared
-   by all episodes (the actual intro/outro music).
+1. Audio fingerprinting over the first 5 episodes (librosa chroma features).
+    Preferred because it finds identical/near-identical segments shared
+    by episodes in the batch, and runs in parallel with on-disk caching.
 2. Silence detection (ffmpeg ``silencedetect`` filter).
    Works well when intros/outros are separated from content by silence.
 3. User-supplied timestamps/durations from config or CLI flags.
@@ -13,9 +13,8 @@ Detection priority (per batch):
 Tradeoffs
 ---------
 * **Fingerprinting** is the most accurate method for TV shows where
-  the intro/outro are identical across episodes.  It requires at least
-  two files and has a higher CPU cost because it decodes audio and
-  computes chroma features.
+    the intro/outro are identical across episodes. It uses up to 5 files
+    for speed, and it decodes audio/computes chroma features in parallel.
 * **Silence detection** is fast but unreliable for compressed audio or
   episodes without a clear silence gap around the intro/outro.
 * **User timestamps** are always reliable but require manual inspection
@@ -24,9 +23,14 @@ Tradeoffs
 
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
 import json
 import logging
+import os
 import subprocess
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -43,6 +47,35 @@ logger = logging.getLogger(__name__)
 # 11 025 Hz is sufficient for chroma analysis and much faster to decode.
 _FINGERPRINT_SR = 11_025
 _HOP_LENGTH = 512  # frames per chroma window
+_MAX_FINGERPRINT_FILES = 5
+_CACHE_VERSION = "v1"
+_CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "fingerprints"
+
+
+@dataclass
+class FingerprintStats:
+    """Runtime statistics for the most recent fingerprinting pass."""
+
+    elapsed_sec: float = 0.0
+    candidate_files: int = 0
+    jobs_submitted: int = 0
+    valid_files: int = 0
+    workers: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+
+
+_LAST_FINGERPRINT_STATS = FingerprintStats()
+
+
+def _set_last_fingerprint_stats(stats: FingerprintStats) -> None:
+    global _LAST_FINGERPRINT_STATS
+    _LAST_FINGERPRINT_STATS = stats
+
+
+def get_last_fingerprint_stats() -> Dict[str, float]:
+    """Return runtime statistics from the last fingerprinting pass."""
+    return asdict(_LAST_FINGERPRINT_STATS)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +228,111 @@ def _find_common_segment_end(
     return None
 
 
+def _fingerprint_cache_path(
+    filepath: str,
+    segment: str,
+    start: float,
+    duration: float,
+    sr: int,
+) -> Path:
+    """Return a stable cache path for a fingerprint segment."""
+    try:
+        st = os.stat(filepath)
+        size = st.st_size
+        mtime_ns = st.st_mtime_ns
+    except OSError:
+        size = -1
+        mtime_ns = -1
+
+    key = "|".join(
+        (
+            filepath,
+            segment,
+            f"{start:.3f}",
+            f"{duration:.3f}",
+            str(sr),
+            str(_HOP_LENGTH),
+            str(size),
+            str(mtime_ns),
+            _CACHE_VERSION,
+        )
+    )
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return _CACHE_DIR / f"{digest}.npz"
+
+
+def _load_cached_fingerprint(path: Path) -> Optional[np.ndarray]:
+    """Load cached fingerprint if available and valid."""
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            fp = data["fp"]
+            if fp.ndim != 2 or fp.shape[0] != 12:
+                return None
+            return fp.astype(np.float32, copy=False)
+    except Exception:  # pylint: disable=broad-except
+        return None
+
+
+def _save_cached_fingerprint(path: Path, fp: np.ndarray) -> None:
+    """Persist fingerprint to cache (best-effort)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, fp=fp.astype(np.float32, copy=False))
+    except Exception:  # pylint: disable=broad-except
+        return
+
+
+def _get_segment_fingerprint(
+    filepath: str,
+    segment: str,
+    start: float,
+    duration: float,
+    sr: int,
+) -> Tuple[Optional[np.ndarray], bool]:
+    """Load a segment fingerprint from cache or compute and cache it."""
+    cache_path = _fingerprint_cache_path(filepath, segment, start, duration, sr)
+    cached = _load_cached_fingerprint(cache_path)
+    if cached is not None:
+        return cached, True
+
+    audio = _extract_audio_pcm(filepath, start=start, duration=duration, sr=sr)
+    if audio is None:
+        return None, False
+
+    fp = _chroma_fingerprint(audio, sr)
+    _save_cached_fingerprint(cache_path, fp)
+    return fp, False
+
+
+def _compute_file_fingerprints(
+    filepath: str,
+    duration: float,
+    search_window: float,
+    sr: int,
+) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray], int, int]:
+    """Compute intro/outro fingerprints for one file (cache-aware)."""
+    seg_duration = min(search_window, duration)
+    intro_fp, intro_cached = _get_segment_fingerprint(
+        filepath,
+        segment="intro",
+        start=0.0,
+        duration=seg_duration,
+        sr=sr,
+    )
+    outro_fp, outro_cached = _get_segment_fingerprint(
+        filepath,
+        segment="outro",
+        start=max(0.0, duration - search_window),
+        duration=seg_duration,
+        sr=sr,
+    )
+    hits = int(intro_cached) + int(outro_cached)
+    misses = int(not intro_cached) + int(not outro_cached)
+    return filepath, intro_fp, outro_fp, hits, misses
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -229,41 +367,81 @@ def detect_by_fingerprinting(
         Mapping of filepath → ``(intro_end, outro_start)`` in seconds.
         Files with insufficient audio are omitted.
     """
+    start_time = time.monotonic()
+    stats = FingerprintStats(candidate_files=min(len(filepaths), _MAX_FINGERPRINT_FILES))
+
     if len(filepaths) < 2:
         logger.info(
             "Fingerprinting requires ≥2 files; got %d.  Skipping.", len(filepaths)
         )
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
         return {}
 
     sr = _FINGERPRINT_SR
-    logger.info("Fingerprinting: extracting intro audio from %d files…", len(filepaths))
+    candidate_paths = filepaths[:_MAX_FINGERPRINT_FILES]
+    logger.info(
+        "Fingerprinting: using first %d episode(s), processing in parallel",
+        len(candidate_paths),
+    )
 
     intro_fps: List[np.ndarray] = []
     outro_fps: List[np.ndarray] = []
     valid_paths: List[str] = []
 
-    for fp in filepaths:
+    jobs: List[Tuple[str, float]] = []
+    for fp in candidate_paths:
         dur = durations.get(fp)
         if dur is None:
             logger.warning("Duration unknown for %s; skipping in fingerprint pass", fp)
             continue
+        jobs.append((fp, dur))
 
-        intro_audio = _extract_audio_pcm(fp, start=0.0, duration=min(search_window, dur), sr=sr)
-        outro_start_offset = max(0.0, dur - search_window)
-        outro_audio = _extract_audio_pcm(
-            fp, start=outro_start_offset, duration=min(search_window, dur), sr=sr
-        )
+    if len(jobs) < 2:
+        logger.warning("Not enough files with known durations for fingerprinting")
+        stats.jobs_submitted = len(jobs)
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
+        return {}
 
-        if intro_audio is None or outro_audio is None:
-            logger.warning("Could not extract audio from %s; skipping", fp)
-            continue
+    max_workers = min(len(jobs), max(1, (os.cpu_count() or 2) // 2))
+    stats.jobs_submitted = len(jobs)
+    stats.workers = max_workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_compute_file_fingerprints, fp, dur, search_window, sr): fp
+            for fp, dur in jobs
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            fp = future_map[future]
+            try:
+                path, intro_fp, outro_fp, hits, misses = future.result()
+                stats.cache_hits += hits
+                stats.cache_misses += misses
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Fingerprint worker failed for %s: %s", fp, exc)
+                continue
 
-        intro_fps.append(_chroma_fingerprint(intro_audio, sr))
-        outro_fps.append(_chroma_fingerprint(outro_audio, sr))
-        valid_paths.append(fp)
+            if intro_fp is None or outro_fp is None:
+                logger.warning("Could not extract audio from %s; skipping", path)
+                continue
+
+            intro_fps.append(intro_fp)
+            outro_fps.append(outro_fp)
+            valid_paths.append(path)
+
+            if len(valid_paths) >= _MAX_FINGERPRINT_FILES:
+                logger.info(
+                    "Fingerprinting early exit: reached %d valid file(s)",
+                    _MAX_FINGERPRINT_FILES,
+                )
+                break
 
     if len(valid_paths) < 2:
         logger.warning("Not enough files with extractable audio for fingerprinting")
+        stats.valid_files = len(valid_paths)
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
         return {}
 
     intro_end = _find_common_segment_end(intro_fps, sr, min_segment, max_segment)
@@ -276,8 +454,12 @@ def detect_by_fingerprinting(
     outro_from_end = _find_common_segment_end(outro_fps_rev, sr, min_segment, max_segment)
 
     results: Dict[str, Tuple[float, float]] = {}
-    for fp in valid_paths:
-        dur = durations[fp]
+    # Apply detected boundaries to the full batch (not only sampled files)
+    # so every episode benefits from fingerprinting.
+    for fp in filepaths:
+        dur = durations.get(fp)
+        if dur is None:
+            continue
         outro_start = (dur - outro_from_end) if outro_from_end else dur
         outro_start = max(intro_end, min(outro_start, dur))
         results[fp] = (intro_end, outro_start)
@@ -287,6 +469,9 @@ def detect_by_fingerprinting(
         intro_end,
         outro_from_end or 0.0,
     )
+    stats.valid_files = len(valid_paths)
+    stats.elapsed_sec = time.monotonic() - start_time
+    _set_last_fingerprint_stats(stats)
     return results
 
 

@@ -7,8 +7,8 @@ Usage
 Detection strategy (in priority order)
 ---------------------------------------
 1. Per-file timestamps supplied via ``--config`` JSON file.
-2. Audio fingerprinting across all episodes (librosa chroma features).
-   Identifies identical/near-identical segments shared by all episodes.
+2. Audio fingerprinting over the first 5 episodes (librosa chroma features).
+    Runs in parallel and uses a local on-disk cache for faster repeat runs.
 3. Silence detection (ffmpeg ``silencedetect`` filter).
 4. User-supplied ``--intro-duration`` / ``--outro-duration`` flags.
 5. No trimming (0 / full duration).
@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Tuple
 from tvshow_noisemaker.config import build_config, load_config
 from tvshow_noisemaker.detector import (
     detect_by_fingerprinting,
+    get_last_fingerprint_stats,
     get_duration,
     resolve_boundaries,
 )
@@ -227,6 +228,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable debug-level logging.",
     )
 
+    parser.add_argument(
+        "--benchmark-fingerprint",
+        action="store_true",
+        help="Print fingerprint timing/cache statistics in the terminal summary.",
+    )
+
     return parser
 
 
@@ -259,6 +266,8 @@ def _ensure_ffmpeg_on_path(log: logging.Logger) -> bool:
 
 def run(args: argparse.Namespace) -> int:
     """Main processing logic.  Returns an exit code (0 = success)."""
+    run_start = time.monotonic()
+
     # Create output dir early so we can write the log file there
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +329,20 @@ def run(args: argparse.Namespace) -> int:
                 durations=durations,
                 search_window=cfg.fingerprint_search_window,
             )
+            if getattr(args, "benchmark_fingerprint", False):
+                fp_stats = get_last_fingerprint_stats()
+                con.info(
+                    "Fingerprint benchmark: %.2fs, candidates=%d, jobs=%d, "
+                    "valid=%d, workers=%d, cache_hits=%d, cache_misses=%d",
+                    fp_stats.get("elapsed_sec", 0.0),
+                    int(fp_stats.get("candidate_files", 0)),
+                    int(fp_stats.get("jobs_submitted", 0)),
+                    int(fp_stats.get("valid_files", 0)),
+                    int(fp_stats.get("workers", 0)),
+                    int(fp_stats.get("cache_hits", 0)),
+                    int(fp_stats.get("cache_misses", 0)),
+                )
+                log.info("Fingerprint benchmark stats: %s", fp_stats)
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("Fingerprinting failed: %s – falling back to silence detection", exc)
 
@@ -334,11 +357,12 @@ def run(args: argparse.Namespace) -> int:
     batch_start = time.monotonic()
 
     con.info("Starting conversion  (%d files, output → %s)", total_count, output_dir)
+    _print_progress_bar(0, total_count, 0, 0, 0, batch_start)
 
-    for idx, filepath in enumerate(video_files, 1):
+    for filepath in video_files:
         basename = Path(filepath).name
         log.info("")
-        log.info("[%d/%d] %s", idx, total_count, basename)
+        log.info("Processing %s", basename)
 
         duration = durations.get(filepath)
 
@@ -353,6 +377,14 @@ def run(args: argparse.Namespace) -> int:
             reason = f"Boundary detection error: {exc}"
             log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
+            _print_progress_bar(
+                len(processed_files) + len(skipped) + len(failed),
+                total_count,
+                len(processed_files),
+                len(skipped),
+                len(failed),
+                batch_start,
+            )
             continue
 
         content_duration = outro_start - intro_end
@@ -373,6 +405,14 @@ def run(args: argparse.Namespace) -> int:
             )
             log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
+            _print_progress_bar(
+                len(processed_files) + len(skipped) + len(failed),
+                total_count,
+                len(processed_files),
+                len(skipped),
+                len(failed),
+                batch_start,
+            )
             continue
 
         output_path = build_output_path(filepath, str(output_dir))
@@ -390,6 +430,14 @@ def run(args: argparse.Namespace) -> int:
             reason = str(exc)
             log.error("  ✗ Failed – %s", reason)
             failed.append((basename, reason))
+            _print_progress_bar(
+                len(processed_files) + len(skipped) + len(failed),
+                total_count,
+                len(processed_files),
+                len(skipped),
+                len(failed),
+                batch_start,
+            )
             continue
 
         file_elapsed = time.monotonic() - file_start
@@ -406,8 +454,23 @@ def run(args: argparse.Namespace) -> int:
             _fmt_bytes(out_size),
         )
 
+        _print_progress_bar(
+            len(processed_files) + len(skipped) + len(failed),
+            total_count,
+            len(processed_files),
+            len(skipped),
+            len(failed),
+            batch_start,
+        )
+
+    # Finish progress line before summary logging
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
     # ── Summary (printed to both terminal and log file) ──────────
     batch_elapsed = time.monotonic() - batch_start
+    total_elapsed = time.monotonic() - run_start
+    rate = (total_count / total_elapsed) if total_elapsed > 0 else 0.0
     con.info("")
     con.info("═" * 60)
     con.info("  SUMMARY")
@@ -421,22 +484,25 @@ def run(args: argparse.Namespace) -> int:
     con.info("  Audio trimmed       : %s", _fmt_duration(total_trimmed_secs))
     con.info("  Total output size   : %s", _fmt_bytes(total_output_bytes))
     con.info("  MP3 bitrate         : %d kbps", cfg.mp3_bitrate)
-    con.info("  Elapsed time        : %s", _fmt_duration(batch_elapsed))
+    con.info("  Conversion time     : %s", _fmt_duration(batch_elapsed))
+    con.info("  Total runtime       : %s", _fmt_duration(total_elapsed))
+    con.info("  Throughput          : %.2f files/sec", rate)
     con.info("  Output directory    : %s", output_dir)
     con.info("  Log file            : %s", log_path)
     con.info("═" * 60)
 
     if skipped:
-        con.info("")
-        con.warning("Skipped files:")
+        log.warning("Skipped files:")
         for name, reason in skipped:
-            con.warning("  • %s – %s", name, reason)
+            log.warning("  • %s – %s", name, reason)
 
     if failed:
-        con.info("")
-        con.error("Failed files:")
+        log.error("Failed files:")
         for name, reason in failed:
-            con.error("  • %s – %s", name, reason)
+            log.error("  • %s – %s", name, reason)
+
+    if skipped or failed:
+        con.info("Detailed skipped/failed entries are in the log file.")
 
     if not failed and not skipped:
         con.info("")
@@ -459,6 +525,34 @@ def _fmt_duration(seconds: float) -> str:
         parts.append(f"{m}m")
     parts.append(f"{s}s")
     return " ".join(parts)
+
+
+def _print_progress_bar(
+    done: int,
+    total: int,
+    processed: int,
+    skipped: int,
+    failed: int,
+    started_at: float,
+) -> None:
+    """Render a single-line progress bar in the terminal."""
+    width = 30
+    ratio = (done / total) if total > 0 else 1.0
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    elapsed = time.monotonic() - started_at
+    rate = (done / elapsed) if elapsed > 0 and done > 0 else 0.0
+    remaining = max(total - done, 0)
+    eta = (remaining / rate) if rate > 0 else 0.0
+    eta_text = _fmt_duration(eta) if done > 0 else "--"
+    msg = (
+        f"\rProgress [{bar}] {done}/{total} "
+        f"ok={processed} skip={skipped} fail={failed} "
+        f"elapsed={_fmt_duration(elapsed)} "
+        f"eta={eta_text} rate={rate:.2f}/s"
+    )
+    sys.stdout.write(msg)
+    sys.stdout.flush()
 
 
 def _fmt_bytes(num_bytes: int) -> str:
