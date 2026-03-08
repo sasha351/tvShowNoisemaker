@@ -181,51 +181,146 @@ def _smooth(arr: np.ndarray, window_frames: int) -> np.ndarray:
     return np.convolve(arr, kernel, mode="same")
 
 
+def _find_alignment_offset(
+    ref: np.ndarray,
+    other: np.ndarray,
+    max_lag_frames: int,
+) -> int:
+    """Return frame offset *d* that best aligns *other* with *ref*.
+
+    Uses FFT cross-correlation across all 12 chroma bands.
+    The result means ``other[:, i - d]`` corresponds to ``ref[:, i]``.
+    Positive *d*: the common segment starts later in *other* than in *ref*.
+    """
+    n_ref = ref.shape[1]
+    n_other = other.shape[1]
+    if n_ref == 0 or n_other == 0:
+        return 0
+
+    n_fft = n_ref + n_other - 1
+    corr = np.zeros(n_fft, dtype=np.float64)
+    for band in range(ref.shape[0]):
+        fa = np.fft.rfft(ref[band].astype(np.float64), n=n_fft)
+        fb = np.fft.rfft(other[band].astype(np.float64), n=n_fft)
+        corr += np.fft.irfft(fa * np.conj(fb), n=n_fft)
+
+    # Only consider lags within ±max_lag_frames
+    mask = np.full(n_fft, -np.inf)
+    for k in range(min(max_lag_frames + 1, n_fft)):
+        mask[k] = corr[k]
+        idx_neg = n_fft - k
+        if 0 < idx_neg < n_fft:
+            mask[idx_neg] = corr[idx_neg]
+
+    peak = int(np.argmax(mask))
+    lag = peak if peak <= n_fft // 2 else peak - n_fft
+    return lag
+
+
 def _find_common_segment_end(
     fingerprints: List[np.ndarray],
     sr: int,
     min_duration: float,
     max_duration: float,
-) -> Optional[float]:
-    """Find where a common leading segment ends, in seconds.
+) -> Optional[List[float]]:
+    """Find where a common segment ends for each fingerprinted episode.
 
-    Compares each fingerprint to the first one (reference) frame-by-frame.
-    Returns the end time (seconds) of the longest contiguous region near
-    frame 0 where *all* episodes share similar audio, or ``None``.
+    Uses cross-correlation to align episodes (handles cold opens where the
+    shared theme song starts at a different time in each episode), then
+    finds the longest contiguous high-similarity run.
+
+    Returns a list of end-times in seconds (parallel to *fingerprints*),
+    or ``None`` if no common segment exceeding *min_duration* is found.
     """
     hop_sec = _HOP_LENGTH / sr
     ref = fingerprints[0]
     n_ref = ref.shape[1]
+    if n_ref == 0:
+        return None
 
-    # Aggregate pairwise similarity with the reference
-    scores = np.zeros(n_ref, dtype=np.float32)
-    for other in fingerprints[1:]:
-        scores[: min(n_ref, other.shape[1])] += _frame_similarity(ref, other)
-    scores /= max(1, len(fingerprints) - 1)
+    max_lag = n_ref // 2
 
-    # Smooth over ~2 seconds
+    # ── Step 1: align every fingerprint to the reference ────────
+    lags = [0]
+    for idx, other in enumerate(fingerprints[1:], 1):
+        lag = _find_alignment_offset(ref, other, max_lag)
+        lags.append(lag)
+        logger.debug("  Alignment: episode %d lag = %d frames (%.1fs)", idx, lag, lag * hop_sec)
+
+    # ── Step 2: compute aligned per-frame similarity ────────────
+    scores = np.zeros(n_ref, dtype=np.float64)
+    counts = np.zeros(n_ref, dtype=np.float64)
+
+    for other, lag in zip(fingerprints[1:], lags[1:]):
+        n_other = other.shape[1]
+        # In the reference coordinate system, valid overlap is
+        # ref[start:end] ↔ other[start-lag : end-lag]
+        start = max(0, lag)
+        end = min(n_ref, n_other + lag)
+        if end - start < 1:
+            continue
+
+        ref_chunk = ref[:, start:end]
+        other_chunk = other[:, start - lag : end - lag]
+        sim = _frame_similarity(ref_chunk, other_chunk)
+        scores[start:end] += sim
+        counts[start:end] += 1
+
+    valid = counts > 0
+    scores[valid] /= counts[valid]
+    scores = scores.astype(np.float32)
+
+    # ── Step 3: smooth and threshold ────────────────────────────
     smooth_window = max(1, int(2.0 / hop_sec))
     scores = _smooth(scores, smooth_window)
 
-    # Use the 60th-percentile similarity as the threshold for "matching" frames.
-    # Values above this are considered shared between episodes (part of intro/outro),
-    # and values below signal the transition to unique per-episode content.
-    # The 60th percentile is a conservative midpoint: low enough to capture most
-    # of the intro even when one episode has a slightly different mix, but high
-    # enough to reject the bulk of unique-content frames.
-    threshold = float(np.percentile(scores, 60))
+    threshold = float(np.percentile(scores[valid] if valid.any() else scores, 60))
     min_frames = max(1, int(min_duration / hop_sec))
-    max_frames = min(n_ref, int(max_duration / hop_sec))
+    max_frames = int(max_duration / hop_sec)
 
-    # Walk forward: find where the high-similarity region ends
-    for frame in range(min_frames, max_frames):
-        if scores[frame] < threshold:
-            return frame * hop_sec
+    # ── Step 4: longest run of above-threshold frames ───────────
+    best_start = 0
+    best_len = 0
+    cur_start = 0
+    cur_len = 0
+    for i in range(n_ref):
+        if scores[i] >= threshold:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+        else:
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start = cur_start
+            cur_len = 0
+    if cur_len > best_len:
+        best_len = cur_len
+        best_start = cur_start
 
-    # If scores stayed high throughout, the whole search window matched
-    if max_frames > min_frames:
-        return max_frames * hop_sec
-    return None
+    if best_len < min_frames:
+        logger.debug(
+            "  No common segment: best_len=%d frames (%.1fs) < min=%d frames (%.1fs), "
+            "threshold=%.4f, score range=[%.4f, %.4f]",
+            best_len, best_len * hop_sec, min_frames, min_duration,
+            threshold,
+            float(scores[valid].min()) if valid.any() else 0,
+            float(scores[valid].max()) if valid.any() else 0,
+        )
+        return None
+
+    if best_len > max_frames:
+        best_len = max_frames
+
+    segment_end_ref = best_start + best_len
+    logger.debug(
+        "  Common segment: frames %d–%d (%.1fs–%.1fs), len=%d (%.1fs), threshold=%.4f",
+        best_start, segment_end_ref,
+        best_start * hop_sec, segment_end_ref * hop_sec,
+        best_len, best_len * hop_sec, threshold,
+    )
+
+    # ── Step 5: per-episode end-times ───────────────────────────
+    return [(segment_end_ref - lag) * hop_sec for lag in lags]
 
 
 def _fingerprint_cache_path(
@@ -344,7 +439,7 @@ def detect_by_fingerprinting(
     search_window: float = 300.0,
     min_segment: float = 5.0,
     max_segment: float = 180.0,
-) -> Dict[str, Tuple[float, float]]:
+) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
     """Detect intro/outro boundaries for a batch of episode files.
 
     Compares audio fingerprints from the beginning (intro) and end (outro)
@@ -365,10 +460,19 @@ def detect_by_fingerprinting(
     -------
     dict
         Mapping of filepath → ``(intro_end, outro_start)`` in seconds.
+        Either boundary can be ``None`` when not confidently detected.
         Files with insufficient audio are omitted.
     """
     start_time = time.monotonic()
     stats = FingerprintStats(candidate_files=min(len(filepaths), _MAX_FINGERPRINT_FILES))
+
+    if _librosa is None:
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
+        raise RuntimeError(
+            "librosa is required for audio fingerprinting but is not installed. "
+            "Run `pip install librosa` or use --no-fingerprint to disable."
+        )
 
     if len(filepaths) < 2:
         logger.info(
@@ -444,30 +548,59 @@ def detect_by_fingerprinting(
         _set_last_fingerprint_stats(stats)
         return {}
 
-    intro_end = _find_common_segment_end(intro_fps, sr, min_segment, max_segment)
-    if intro_end is None:
+    intro_ends = _find_common_segment_end(intro_fps, sr, min_segment, max_segment)
+    if intro_ends is None:
         logger.info("Fingerprinting: could not detect a common intro segment")
-        intro_end = 0.0
 
     # Outro: same logic but fingerprints are reversed so that "end" is at frame 0
     outro_fps_rev = [fp[:, ::-1] for fp in outro_fps]
-    outro_from_end = _find_common_segment_end(outro_fps_rev, sr, min_segment, max_segment)
+    outro_from_ends = _find_common_segment_end(outro_fps_rev, sr, min_segment, max_segment)
 
-    results: Dict[str, Tuple[float, float]] = {}
-    # Apply detected boundaries to the full batch (not only sampled files)
-    # so every episode benefits from fingerprinting.
+    # Build per-fingerprinted-episode lookup
+    fp_intro_map: Dict[str, float] = {}
+    fp_outro_from_end_map: Dict[str, float] = {}
+    if intro_ends is not None:
+        for path, val in zip(valid_paths, intro_ends):
+            fp_intro_map[path] = val
+    if outro_from_ends is not None:
+        for path, val in zip(valid_paths, outro_from_ends):
+            fp_outro_from_end_map[path] = val
+
+    # Median values for episodes that were not fingerprinted
+    median_intro = float(np.median(list(fp_intro_map.values()))) if fp_intro_map else None
+    median_outro_from_end = (
+        float(np.median(list(fp_outro_from_end_map.values())))
+        if fp_outro_from_end_map
+        else None
+    )
+
+    results: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
     for fp in filepaths:
         dur = durations.get(fp)
         if dur is None:
             continue
-        outro_start = (dur - outro_from_end) if outro_from_end else dur
-        outro_start = max(intro_end, min(outro_start, dur))
-        results[fp] = (intro_end, outro_start)
+
+        ie: Optional[float] = fp_intro_map.get(fp)
+        if ie is None and intro_ends is not None:
+            ie = median_intro
+
+        ofe = fp_outro_from_end_map.get(fp)
+        if ofe is None and outro_from_ends is not None:
+            ofe = median_outro_from_end
+
+        if ofe is not None:
+            outro_start: Optional[float] = dur - ofe
+            lower = ie if ie is not None else 0.0
+            outro_start = max(lower, min(outro_start, dur))
+        else:
+            outro_start = None
+
+        results[fp] = (ie, outro_start)
 
     logger.info(
-        "Fingerprinting result – intro_end=%.1fs, outro_from_end=%.1fs",
-        intro_end,
-        outro_from_end or 0.0,
+        "Fingerprinting result – intro_end=%s, outro_from_end=%s (per-episode, showing medians)",
+        f"{median_intro:.1f}s" if median_intro is not None else "N/A",
+        f"{median_outro_from_end:.1f}s" if median_outro_from_end is not None else "N/A",
     )
     stats.valid_files = len(valid_paths)
     stats.elapsed_sec = time.monotonic() - start_time
@@ -519,10 +652,16 @@ def detect_by_silence(
             except (IndexError, ValueError):
                 pass
 
-    # Intro end: first silence that begins very close to t=0 ends at silence_ends[0]
+    # Intro end: look for the first significant silence gap in the first
+    # few minutes.  A gap must end at ≥5 s to be a plausible intro boundary
+    # (otherwise it's just a brief pause at the very start of the file).
     intro_end: Optional[float] = None
-    if silence_ends and silence_starts and silence_starts[0] < 2.0:
-        intro_end = silence_ends[0]
+    for s_start, s_end in zip(silence_starts, silence_ends):
+        if s_start > 300.0:       # stop searching past 5 minutes
+            break
+        if s_end >= 5.0:           # reject trivially short boundaries
+            intro_end = s_end
+            break
 
     # Outro start: last detected silence start
     outro_start: Optional[float] = None
@@ -540,7 +679,7 @@ def detect_by_silence(
 def resolve_boundaries(
     filepath: str,
     cfg: "Config",  # type: ignore[name-defined]  # avoid circular import
-    fingerprint_results: Dict[str, Tuple[float, float]],
+    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float]]],
     duration: Optional[float],
 ) -> Tuple[float, float]:
     """Return ``(intro_end, outro_start)`` for *filepath* using all strategies.
@@ -583,15 +722,19 @@ def resolve_boundaries(
     # Merge: prefer fingerprinting over silence; prefer both over user durations
     intro_end = _coalesce(
         ts_intro,
-        fp_intro if fp_intro and fp_intro > 0 else None,
+        fp_intro,
         sil_intro,
         cfg.intro_duration,
         0.0,
     )
-    fallback_outro = (duration - cfg.outro_duration) if (duration and cfg.outro_duration) else None
+    fallback_outro = (
+        duration - cfg.outro_duration
+        if duration is not None and cfg.outro_duration is not None
+        else None
+    )
     outro_start = _coalesce(
         ts_outro,
-        fp_outro if fp_outro and (duration is None or fp_outro < duration) else None,
+        fp_outro if fp_outro is not None and (duration is None or fp_outro < duration) else None,
         sil_outro,
         fallback_outro,
         duration,

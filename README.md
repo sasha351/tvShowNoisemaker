@@ -15,6 +15,7 @@ trimmed `.mp3` files with intros and outros removed.
   3. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
 - **Configurable MP3 bitrate** (default 192 kbps).
 - **Skip + log** – failed or invalid files are skipped and logged; the batch never crashes.
+- **Safe detection fallback** – if no intro/outro boundary can be detected, that file is skipped instead of converting the full episode.
 - **Optional JSON config file** for reproducible runs.
 
 ---
@@ -98,13 +99,16 @@ tvshow-noisemaker --input-dir ./eps --output-dir ./out \
 | `--outro-duration SECS` | `None` | Fallback outro duration in seconds from end |
 | `--mp3-bitrate KBPS` | `192` | MP3 encoding bitrate |
 | `--config FILE` | `None` | Path to JSON config file |
-| `--log-file FILE` | `None` | Write skip/failure log to this file |
+| `--log-file FILE` | `None` | Override log file path (default log file is auto-created in output dir) |
 | `--fingerprint` | *(on)* | Use audio fingerprinting (default) |
 | `--no-fingerprint` | – | Disable fingerprinting |
 | `--silence-db DB` | `-40.0` | Silence threshold in dBFS |
 | `--min-silence-len SECS` | `0.5` | Minimum silence duration |
 | `--fingerprint-search-window SECS` | `300` | Seconds from start/end to examine |
 | `--verbose`, `-v` | – | Enable debug logging |
+
+Terminal logging defaults to `INFO+`; `--verbose` raises terminal output to `DEBUG`.
+The log file always captures `DEBUG` details.
 
 ---
 
@@ -166,4 +170,4 @@ pytest
 ## Output
 
 - One `.mp3` per input video file, same filename, written to `--output-dir`.
-- A log file (if `--log-file` is given) listing skipped and failed files.
+- A log file is always created (auto-named in `--output-dir` unless `--log-file` is set) listing detailed processing, skipped files, and failures.

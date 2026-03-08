@@ -1,12 +1,14 @@
 """Tests for tvshow_noisemaker.cli (integration-style, all I/O mocked)."""
 
+import logging
+
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from tvshow_noisemaker.cli import run, _build_parser
+from tvshow_noisemaker.cli import run, _build_parser, _setup_logging
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +190,52 @@ def test_run_skips_invalid_boundaries(tmp_path):
     mock_proc.assert_not_called()
 
 
+def test_run_skips_unresolved_default_boundaries(tmp_path):
+    ep = tmp_path / "ep01.mp4"
+    ep.touch()
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+    )
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 2700.0)),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    mock_proc.assert_not_called()
+
+
+def test_run_allows_explicit_user_no_trim(tmp_path):
+    ep = tmp_path / "ep01.mp4"
+    ep.touch()
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        intro_duration=0.0,
+        outro_duration=0.0,
+    )
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 2700.0)),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    mock_proc.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # run() – config file integration
 # ---------------------------------------------------------------------------
@@ -251,3 +299,19 @@ def test_run_creates_log_file(tmp_path):
         run(args)
 
     assert log_file.exists()
+
+
+def test_setup_logging_default_console_level_info(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    con, _, _ = _setup_logging(
+        input_dir=str(tmp_path),
+        output_dir=str(output_dir),
+        log_file=None,
+        verbose=False,
+    )
+
+    stream_handlers = [h for h in con.handlers if hasattr(h, "stream")]
+    assert stream_handlers, "Expected at least one stream handler on console logger"
+    # Stream handler level should default to INFO unless --verbose is set.
+    assert any(h.level == logging.INFO for h in stream_handlers)

@@ -11,7 +11,7 @@ Detection strategy (in priority order)
     Runs in parallel and uses a local on-disk cache for faster repeat runs.
 3. Silence detection (ffmpeg ``silencedetect`` filter).
 4. User-supplied ``--intro-duration`` / ``--outro-duration`` flags.
-5. No trimming (0 / full duration).
+5. If unresolved, skip file (avoid full-episode conversion).
 """
 
 from __future__ import annotations
@@ -60,10 +60,10 @@ def _setup_logging(
 ) -> tuple:
     """Configure logging with separate terminal and file handlers.
 
-    Terminal gets summary-level messages only (WARNING+ by default, or
-    INFO+ with --verbose).  The log file gets everything (DEBUG).
+    Terminal gets summary-level messages (INFO+ by default, or
+    DEBUG with --verbose). The log file gets everything (DEBUG).
 
-    Returns ``(terminal_logger, file_logger, log_path)``.
+    Returns ``(terminal_logger, app_logger, log_path)``.
     """
     # Determine log file path
     if log_file:
@@ -80,10 +80,10 @@ def _setup_logging(
     # Remove any pre-existing handlers (e.g. from repeated test runs)
     root.handlers.clear()
 
-    # File handler – all detail
+    # File handler – DEBUG only when verbose, otherwise INFO
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(logging.DEBUG if verbose else logging.INFO)
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
@@ -92,10 +92,9 @@ def _setup_logging(
     console.setLevel(logging.DEBUG if verbose else logging.INFO)
     console.setFormatter(fmt)
 
-    # The "console" logger is used for messages that should appear on screen.
-    # The regular logger writes to the file only.
-    file_log = logging.getLogger("tvshow_noisemaker")
-    file_log.setLevel(logging.DEBUG)
+    # App logger receives detailed logs from module loggers via root propagation.
+    app_log = logging.getLogger("tvshow_noisemaker")
+    app_log.setLevel(logging.DEBUG)
 
     console_log = logging.getLogger("tvshow_noisemaker.console")
     console_log.setLevel(logging.DEBUG)
@@ -103,7 +102,7 @@ def _setup_logging(
     console_log.addHandler(console)
     console_log.addHandler(fh)             # also write summary lines to log file
 
-    return console_log, file_log, log_path
+    return console_log, app_log, log_path
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -272,7 +271,7 @@ def run(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    con, log, log_path = _setup_logging(
+    con, app_log, log_path = _setup_logging(
         args.input_dir,
         args.output_dir,
         args.log_file,
@@ -307,7 +306,6 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     con.info("Found %d video file(s) in %s", len(video_files), input_dir)
-    log.info("Found %d video file(s) in %s", len(video_files), input_dir)
 
     # Get durations for all files (needed by fingerprinting and outro detection)
     durations: Dict[str, float] = {}
@@ -316,13 +314,12 @@ def run(args: argparse.Namespace) -> int:
         if dur is not None:
             durations[fp] = dur
         else:
-            log.warning("Could not determine duration for %s; will attempt to process anyway", fp)
+            app_log.warning("Could not determine duration for %s; will attempt to process anyway", fp)
 
     # Fingerprint pass (batch)
-    fingerprint_results: Dict[str, Tuple[float, float]] = {}
+    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
     if cfg.use_fingerprinting and len(video_files) >= 2:
         con.info("Running audio fingerprinting across %d episodes…", len(video_files))
-        log.info("Running audio fingerprinting across %d episodes…", len(video_files))
         try:
             fingerprint_results = detect_by_fingerprinting(
                 video_files,
@@ -342,9 +339,13 @@ def run(args: argparse.Namespace) -> int:
                     int(fp_stats.get("cache_hits", 0)),
                     int(fp_stats.get("cache_misses", 0)),
                 )
-                log.info("Fingerprint benchmark stats: %s", fp_stats)
+                app_log.info("Fingerprint benchmark stats: %s", fp_stats)
         except Exception as exc:  # pylint: disable=broad-except
-            log.warning("Fingerprinting failed: %s – falling back to silence detection", exc)
+            con.warning(
+                "Fingerprinting failed: %s – falling back to silence detection "
+                "(results may be less accurate)",
+                exc,
+            )
 
     # Per-file processing
     skipped: List[Tuple[str, str]] = []
@@ -361,10 +362,19 @@ def run(args: argparse.Namespace) -> int:
 
     for filepath in video_files:
         basename = Path(filepath).name
-        log.info("")
-        log.info("Processing %s", basename)
+        app_log.info("")
+        app_log.info("Processing %s", basename)
 
         duration = durations.get(filepath)
+
+        # Log what fingerprinting found for this file (if anything)
+        fp_intro, fp_outro = fingerprint_results.get(filepath, (None, None))
+        if fp_intro is not None or fp_outro is not None:
+            app_log.info(
+                "  Fingerprint boundaries: intro_end=%.1fs, outro_start=%s",
+                fp_intro if fp_intro is not None else 0.0,
+                f"{fp_outro:.1f}s" if fp_outro is not None else "N/A",
+            )
 
         try:
             intro_end, outro_start = resolve_boundaries(
@@ -375,7 +385,43 @@ def run(args: argparse.Namespace) -> int:
             )
         except Exception as exc:  # pylint: disable=broad-except
             reason = f"Boundary detection error: {exc}"
-            log.warning("  ✗ Skipped – %s", reason)
+            app_log.warning("  ✗ Skipped – %s", reason)
+            skipped.append((basename, reason))
+            _print_progress_bar(
+                len(processed_files) + len(skipped) + len(failed),
+                total_count,
+                len(processed_files),
+                len(skipped),
+                len(failed),
+                batch_start,
+            )
+            continue
+
+        # If no strategy could determine meaningful boundaries, skip instead of
+        # silently converting the full file with intro/outro still included.
+        ts = cfg.timestamps.get(basename, {})
+        has_timestamp_override = (
+            ts.get("intro_end") is not None or ts.get("outro_start") is not None
+        )
+        has_user_duration_override = (
+            cfg.intro_duration is not None or cfg.outro_duration is not None
+        )
+        fp_intro, fp_outro = fingerprint_results.get(filepath, (None, None))
+        has_fingerprint_boundary = fp_intro is not None or fp_outro is not None
+        is_unresolved_defaults = (
+            duration is not None
+            and abs(intro_end) < 1e-6
+            and abs(outro_start - duration) < 1e-3
+        )
+
+        if (
+            is_unresolved_defaults
+            and not has_timestamp_override
+            and not has_user_duration_override
+            and not has_fingerprint_boundary
+        ):
+            reason = "No intro/outro boundaries detected (skipped to avoid full-file conversion)"
+            app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
             _print_progress_bar(
                 len(processed_files) + len(skipped) + len(failed),
@@ -390,7 +436,7 @@ def run(args: argparse.Namespace) -> int:
         content_duration = outro_start - intro_end
         trimmed = (duration or 0.0) - content_duration
 
-        log.info(
+        app_log.info(
             "  Trim: %.1fs → %.1fs  (keeping %.1fs, removing %.1fs)",
             intro_end,
             outro_start,
@@ -403,7 +449,7 @@ def run(args: argparse.Namespace) -> int:
                 f"Invalid boundaries: intro_end={intro_end:.2f}s "
                 f">= outro_start={outro_start:.2f}s"
             )
-            log.warning("  ✗ Skipped – %s", reason)
+            app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
             _print_progress_bar(
                 len(processed_files) + len(skipped) + len(failed),
@@ -428,7 +474,7 @@ def run(args: argparse.Namespace) -> int:
             )
         except Exception as exc:  # pylint: disable=broad-except
             reason = str(exc)
-            log.error("  ✗ Failed – %s", reason)
+            app_log.error("  ✗ Failed – %s", reason)
             failed.append((basename, reason))
             _print_progress_bar(
                 len(processed_files) + len(skipped) + len(failed),
@@ -447,7 +493,7 @@ def run(args: argparse.Namespace) -> int:
         total_trimmed_secs += max(trimmed, 0.0)
         processed_files.append(basename)
 
-        log.info(
+        app_log.info(
             "  ✓ Done in %.1fs → %s (%s)",
             file_elapsed,
             Path(output_path).name,
@@ -492,14 +538,14 @@ def run(args: argparse.Namespace) -> int:
     con.info("═" * 60)
 
     if skipped:
-        log.warning("Skipped files:")
+        app_log.warning("Skipped files:")
         for name, reason in skipped:
-            log.warning("  • %s – %s", name, reason)
+            app_log.warning("  • %s – %s", name, reason)
 
     if failed:
-        log.error("Failed files:")
+        app_log.error("Failed files:")
         for name, reason in failed:
-            log.error("  • %s – %s", name, reason)
+            app_log.error("  • %s – %s", name, reason)
 
     if skipped or failed:
         con.info("Detailed skipped/failed entries are in the log file.")
