@@ -1,9 +1,10 @@
 """Per-file processing: trim audio and convert to MP3.
 
-Uses ``ffmpeg`` (via ``subprocess``) to:
-1. Seek to *intro_end* (start of content).
-2. Read until *outro_start* (end of content).
-3. Encode the extracted audio as MP3 at the requested bitrate.
+Uses ``ffmpeg`` (via ``subprocess``) to either:
+* **Simple trim** – seek to *intro_end*, read until *outro_start*.
+* **Concat trim** – when there is a cold open before the intro/theme,
+  keep ``[0 .. intro_start]`` and ``[intro_end .. outro_start]`` and
+  join them with the ffmpeg ``concat`` audio filter.
 """
 
 from __future__ import annotations
@@ -15,12 +16,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Minimum pre-intro content (seconds) to bother preserving via concat.
+_MIN_COLD_OPEN = 1.0
+
 
 def process_file(
     input_path: str,
     output_path: str,
     intro_end: float,
     outro_start: float,
+    intro_start: float = 0.0,
     mp3_bitrate: int = 192,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
@@ -32,9 +37,13 @@ def process_file(
     output_path:
         Absolute path for the destination ``.mp3`` file.
     intro_end:
-        Start time (seconds) of the content we want to keep.
+        Time (seconds) where the intro/theme ends (content resumes).
     outro_start:
-        End time (seconds) of the content we want to keep.
+        Time (seconds) where the outro/credits begin.
+    intro_start:
+        Time (seconds) where the intro/theme begins.  Content before
+        this (the cold open) is preserved.  When 0 the behaviour is
+        the same as a simple seek to *intro_end*.
     mp3_bitrate:
         MP3 encoding bitrate in kbps (e.g. 192).
 
@@ -51,22 +60,23 @@ def process_file(
             f"intro_end ({intro_end:.2f}s) for {input_path}"
         )
 
-    duration = outro_start - intro_end
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "ffmpeg",
-        "-y",                          # overwrite without asking
-        "-ss", str(intro_end),         # seek to content start (fast seek)
-        "-t", str(duration),           # duration to encode
-        "-i", input_path,
-        "-vn",                         # drop video stream
-        "-acodec", "libmp3lame",
-        "-ab", f"{mp3_bitrate}k",
-        "-ac", "2",                    # stereo output
-        output_path,
-    ]
+    has_cold_open = intro_start >= _MIN_COLD_OPEN and intro_start < intro_end
+
+    if has_cold_open:
+        cmd = _build_concat_cmd(
+            input_path, output_path,
+            intro_start, intro_end, outro_start,
+            mp3_bitrate,
+        )
+    else:
+        cmd = _build_simple_cmd(
+            input_path, output_path,
+            intro_end, outro_start,
+            mp3_bitrate,
+        )
 
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
 
@@ -93,6 +103,58 @@ def process_file(
         )
 
     logger.info("Written: %s", output_path)
+
+
+def _build_simple_cmd(
+    input_path: str,
+    output_path: str,
+    intro_end: float,
+    outro_start: float,
+    mp3_bitrate: int,
+) -> list:
+    """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
+    duration = outro_start - intro_end
+    return [
+        "ffmpeg",
+        "-y",
+        "-ss", str(intro_end),
+        "-t", str(duration),
+        "-i", input_path,
+        "-map", "0:a:0",
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-ab", f"{mp3_bitrate}k",
+        "-ac", "2",
+        output_path,
+    ]
+
+
+def _build_concat_cmd(
+    input_path: str,
+    output_path: str,
+    intro_start: float,
+    intro_end: float,
+    outro_start: float,
+    mp3_bitrate: int,
+) -> list:
+    """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
+    filter_complex = (
+        f"[0:a]atrim=start=0:end={intro_start},asetpts=PTS-STARTPTS[pre];"
+        f"[0:a]atrim=start={intro_end}:end={outro_start},asetpts=PTS-STARTPTS[post];"
+        f"[pre][post]concat=n=2:v=0:a=1[out]"
+    )
+    return [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-filter_complex", filter_complex,
+        "-map", "[out]",
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-ab", f"{mp3_bitrate}k",
+        "-ac", "2",
+        output_path,
+    ]
 
 
 def build_output_path(input_path: str, output_dir: str) -> str:

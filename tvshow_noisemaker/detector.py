@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -50,6 +51,22 @@ _HOP_LENGTH = 512  # frames per chroma window
 _MAX_FINGERPRINT_FILES = 5
 _CACHE_VERSION = "v1"
 _CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "fingerprints"
+_SILENCE_CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "silence"
+_CHROMAPRINT_CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "chromaprint"
+
+# Chromaprint constants (adapted from intro-skipper's detection algorithm).
+# Each Chromaprint point represents ~0.1238 seconds of audio.
+_CHROMAPRINT_SAMPLES_TO_SEC = 0.1238
+# Max differing bits (out of 32) for two fingerprint points to be considered matching.
+_CHROMAPRINT_MAX_DIFF = 6
+# Max gap (seconds) allowed inside a contiguous matching region.
+_CHROMAPRINT_MAX_TIME_SKIP = 3.5
+# Fuzzy lookup range (±) when searching the inverted fingerprint index.
+_CHROMAPRINT_INDEX_SHIFT = 2
+# Popcount lookup table (byte → number of set bits), computed once at import.
+_POPCOUNT_LUT = np.array([bin(i).count('1') for i in range(256)], dtype=np.int32)
+# Cached result of fpcalc availability check.
+_fpcalc_available: Optional[bool] = None
 
 
 @dataclass
@@ -181,6 +198,49 @@ def _smooth(arr: np.ndarray, window_frames: int) -> np.ndarray:
     return np.convolve(arr, kernel, mode="same")
 
 
+def _otsu_threshold(arr: np.ndarray) -> float:
+    """Compute Otsu's threshold for a 1-D array of continuous values.
+
+    Finds the value that best separates the distribution into two classes
+    (e.g. "theme" vs "non-theme" similarity scores) by maximising the
+    inter-class variance.  This is fully adaptive — it works regardless of
+    the theme-to-episode length ratio or the absolute similarity scale.
+    """
+    n_bins = 256
+    mn, mx = float(arr.min()), float(arr.max())
+    if mx - mn < 1e-8:
+        return float(mn)
+    hist, bin_edges = np.histogram(arr, bins=n_bins, range=(mn, mx))
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
+    total = hist.sum()
+    if total == 0:
+        return float(mn)
+
+    sum_total = float((hist * bin_centers).sum())
+    sum_bg = 0.0
+    weight_bg = 0
+    max_variance = 0.0
+    best_threshold = float(mn)
+
+    for i in range(n_bins):
+        weight_bg += hist[i]
+        if weight_bg == 0:
+            continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0:
+            break
+        sum_bg += hist[i] * bin_centers[i]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if variance > max_variance:
+            max_variance = variance
+            best_threshold = float(bin_centers[i])
+
+    return best_threshold
+
+
 def _find_alignment_offset(
     ref: np.ndarray,
     other: np.ndarray,
@@ -198,38 +258,38 @@ def _find_alignment_offset(
         return 0
 
     n_fft = n_ref + n_other - 1
-    corr = np.zeros(n_fft, dtype=np.float64)
-    for band in range(ref.shape[0]):
-        fa = np.fft.rfft(ref[band].astype(np.float64), n=n_fft)
-        fb = np.fft.rfft(other[band].astype(np.float64), n=n_fft)
-        corr += np.fft.irfft(fa * np.conj(fb), n=n_fft)
+    # Batch FFT across all 12 chroma bands at once
+    fa = np.fft.rfft(ref.astype(np.float64), n=n_fft, axis=1)
+    fb = np.fft.rfft(other.astype(np.float64), n=n_fft, axis=1)
+    corr = np.fft.irfft(fa * np.conj(fb), n=n_fft, axis=1).sum(axis=0)
 
     # Only consider lags within ±max_lag_frames
     mask = np.full(n_fft, -np.inf)
-    for k in range(min(max_lag_frames + 1, n_fft)):
-        mask[k] = corr[k]
-        idx_neg = n_fft - k
-        if 0 < idx_neg < n_fft:
-            mask[idx_neg] = corr[idx_neg]
+    lag_limit = min(max_lag_frames + 1, n_fft)
+    indices = np.arange(lag_limit)
+    mask[indices] = corr[indices]
+    neg_indices = n_fft - indices[1:]  # skip k=0 (n_fft - 0 == n_fft, out of bounds)
+    valid_neg = neg_indices[(neg_indices > 0) & (neg_indices < n_fft)]
+    mask[valid_neg] = corr[valid_neg]
 
     peak = int(np.argmax(mask))
     lag = peak if peak <= n_fft // 2 else peak - n_fft
     return lag
 
 
-def _find_common_segment_end(
+def _find_common_segment_bounds(
     fingerprints: List[np.ndarray],
     sr: int,
     min_duration: float,
     max_duration: float,
-) -> Optional[List[float]]:
-    """Find where a common segment ends for each fingerprinted episode.
+) -> Optional[Tuple[List[float], List[float]]]:
+    """Find where a common segment starts and ends for each fingerprinted episode.
 
     Uses cross-correlation to align episodes (handles cold opens where the
     shared theme song starts at a different time in each episode), then
     finds the longest contiguous high-similarity run.
 
-    Returns a list of end-times in seconds (parallel to *fingerprints*),
+    Returns ``(starts, ends)`` — two parallel lists of times in seconds,
     or ``None`` if no common segment exceeding *min_duration* is found.
     """
     hop_sec = _HOP_LENGTH / sr
@@ -274,7 +334,7 @@ def _find_common_segment_end(
     smooth_window = max(1, int(2.0 / hop_sec))
     scores = _smooth(scores, smooth_window)
 
-    threshold = float(np.percentile(scores[valid] if valid.any() else scores, 60))
+    threshold = _otsu_threshold(scores[valid] if valid.any() else scores)
     min_frames = max(1, int(min_duration / hop_sec))
     max_frames = int(max_duration / hop_sec)
 
@@ -319,8 +379,41 @@ def _find_common_segment_end(
         best_len, best_len * hop_sec, threshold,
     )
 
-    # ── Step 5: per-episode end-times ───────────────────────────
-    return [(segment_end_ref - lag) * hop_sec for lag in lags]
+    # ── Step 5: per-episode start/end times ─────────────────────
+    starts = [max(0.0, (best_start - lag) * hop_sec) for lag in lags]
+    ends = [(segment_end_ref - lag) * hop_sec for lag in lags]
+    return starts, ends, best_start, best_len
+
+
+def _match_template_position(
+    template: np.ndarray,
+    episode_fp: np.ndarray,
+    sr: int,
+) -> Optional[Tuple[float, float]]:
+    """Find where *template* best matches inside *episode_fp*.
+
+    Uses FFT cross-correlation across all 12 chroma bands.
+
+    Returns ``(start_seconds, end_seconds)`` or ``None`` if the template
+    is longer than the episode fingerprint.
+    """
+    hop_sec = _HOP_LENGTH / sr
+    T = template.shape[1]
+    N = episode_fp.shape[1]
+    if T == 0 or N == 0 or T > N:
+        return None
+
+    n_fft = N + T - 1
+    fa = np.fft.rfft(episode_fp.astype(np.float64), n=n_fft, axis=1)
+    fb = np.fft.rfft(template.astype(np.float64), n=n_fft, axis=1)
+    corr = np.fft.irfft(fa * np.conj(fb), n=n_fft, axis=1).sum(axis=0)
+
+    valid_len = N - T + 1
+    peak_idx = int(np.argmax(corr[:valid_len]))
+
+    start_time = peak_idx * hop_sec
+    end_time = (peak_idx + T) * hop_sec
+    return start_time, end_time
 
 
 def _fingerprint_cache_path(
@@ -429,6 +522,421 @@ def _compute_file_fingerprints(
 
 
 # ---------------------------------------------------------------------------
+# Chromaprint-based detection (primary, adapted from intro-skipper)
+# ---------------------------------------------------------------------------
+
+
+def _check_fpcalc() -> bool:
+    """Return True if the ``fpcalc`` CLI tool (Chromaprint) is available."""
+    global _fpcalc_available
+    if _fpcalc_available is not None:
+        return _fpcalc_available
+    try:
+        result = subprocess.run(
+            ["fpcalc", "-version"], capture_output=True, text=True, timeout=5
+        )
+        _fpcalc_available = result.returncode == 0
+    except (FileNotFoundError, Exception):
+        _fpcalc_available = False
+    if _fpcalc_available:
+        logger.info("fpcalc (Chromaprint) detected – using Chromaprint fingerprinting")
+    else:
+        logger.info("fpcalc not available – falling back to chroma STFT fingerprinting")
+    return _fpcalc_available
+
+
+def _chromaprint_cache_path(
+    filepath: str, start: float, duration: float,
+) -> Path:
+    """Return a stable cache path for a Chromaprint fingerprint."""
+    try:
+        st = os.stat(filepath)
+        size, mtime_ns = st.st_size, st.st_mtime_ns
+    except OSError:
+        size, mtime_ns = -1, -1
+    key = "|".join((
+        filepath, f"{start:.3f}", f"{duration:.3f}",
+        "chromaprint", str(size), str(mtime_ns), _CACHE_VERSION,
+    ))
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return _CHROMAPRINT_CACHE_DIR / f"{digest}.npy"
+
+
+def _fpcalc_direct(filepath: str, max_length: float) -> Optional[np.ndarray]:
+    """Run ``fpcalc`` directly on *filepath* (starts from the beginning)."""
+    cmd = [
+        "fpcalc", "-raw", "-json",
+        "-length", str(int(max_length + 1)),
+        filepath,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            logger.debug("fpcalc failed for %s: %s", filepath, result.stderr[:200])
+            return None
+        data = json.loads(result.stdout)
+        fp = data.get("fingerprint", [])
+        return np.array(fp, dtype=np.uint32) if fp else None
+    except Exception as exc:
+        logger.debug("fpcalc exception for %s: %s", filepath, exc)
+        return None
+
+
+def _fpcalc_segment(
+    filepath: str, start: float, duration: float,
+) -> Optional[np.ndarray]:
+    """Extract an audio segment with ffmpeg, then fingerprint it with ``fpcalc``."""
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(tmp_fd)
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+            "-i", filepath, "-ac", "1", "-ar", "16000",
+            "-f", "wav", tmp_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        if r.returncode != 0:
+            return None
+        cmd = [
+            "fpcalc", "-raw", "-json",
+            "-length", str(int(duration + 1)),
+            tmp_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+        fp = data.get("fingerprint", [])
+        return np.array(fp, dtype=np.uint32) if fp else None
+    except Exception as exc:
+        logger.debug("fpcalc segment exception for %s: %s", filepath, exc)
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _extract_chromaprint(
+    filepath: str, start: float, duration: float,
+) -> Tuple[Optional[np.ndarray], bool]:
+    """Extract a Chromaprint fingerprint from the given segment.
+
+    Returns ``(fingerprint_array, was_cached)``.
+    """
+    cache_path = _chromaprint_cache_path(filepath, start, duration)
+    if cache_path.exists():
+        try:
+            fp = np.load(cache_path, allow_pickle=False)
+            if fp.dtype == np.uint32 and fp.ndim == 1 and len(fp) > 0:
+                return fp, True
+        except Exception:
+            pass
+
+    fp = _fpcalc_direct(filepath, duration) if start < 0.5 else _fpcalc_segment(filepath, start, duration)
+
+    if fp is not None and len(fp) > 0:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(cache_path, fp)
+        except Exception:
+            pass
+        return fp, False
+    return None, False
+
+
+# ── Chromaprint comparison helpers ──────────────────────────────────────────
+
+
+def _popcount32(arr: np.ndarray) -> np.ndarray:
+    """Count set bits for each uint32 element (vectorised via byte LUT)."""
+    return _POPCOUNT_LUT[arr.view(np.uint8)].reshape(-1, 4).sum(axis=1)
+
+
+def _create_inverted_index(fp: np.ndarray) -> Dict[int, int]:
+    """Map each fingerprint point value to the *last* index it appeared at."""
+    idx: Dict[int, int] = {}
+    for i in range(len(fp)):
+        idx[int(fp[i])] = i
+    return idx
+
+
+def _find_contiguous_range(
+    times: np.ndarray, max_gap: float,
+) -> Optional[Tuple[float, float]]:
+    """Return the start and end of longest contiguous block (gap ≤ *max_gap*)."""
+    if len(times) == 0:
+        return None
+    best_s = best_e = cur_s = cur_e = times[0]
+    best_d = 0.0
+    for i in range(len(times) - 1):
+        if times[i + 1] - times[i] <= max_gap:
+            cur_e = times[i + 1]
+        else:
+            d = cur_e - cur_s
+            if d > best_d:
+                best_d, best_s, best_e = d, cur_s, cur_e
+            cur_s = cur_e = times[i + 1]
+    d = cur_e - cur_s
+    if d > best_d:
+        best_d, best_s, best_e = d, cur_s, cur_e
+    return (float(best_s), float(best_e)) if best_d > 0 else None
+
+
+def _find_contiguous_at_shift(
+    lhs: np.ndarray, rhs: np.ndarray, shift: int,
+) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """XOR-compare fingerprints at the given *shift* and find matching runs."""
+    left_off = max(0, -shift)
+    right_off = max(0, shift)
+    upper = min(len(lhs), len(rhs)) - abs(shift)
+    if upper <= 0:
+        return None, None
+
+    diff = np.bitwise_xor(
+        lhs[left_off : left_off + upper],
+        rhs[right_off : right_off + upper],
+    )
+    bits = _popcount32(diff)
+    matches = np.where(bits <= _CHROMAPRINT_MAX_DIFF)[0]
+    if len(matches) == 0:
+        return None, None
+
+    lhs_times = np.sort((matches + left_off).astype(np.float64) * _CHROMAPRINT_SAMPLES_TO_SEC)
+    rhs_times = np.sort((matches + right_off).astype(np.float64) * _CHROMAPRINT_SAMPLES_TO_SEC)
+
+    lhs_range = _find_contiguous_range(lhs_times, _CHROMAPRINT_MAX_TIME_SKIP)
+    if lhs_range is None:
+        return None, None
+    rhs_range = _find_contiguous_range(rhs_times, _CHROMAPRINT_MAX_TIME_SKIP)
+    return lhs_range, rhs_range
+
+
+def _compare_episodes_chromaprint(
+    lhs_fp: np.ndarray,
+    rhs_fp: np.ndarray,
+    min_dur: float = 15.0,
+    max_dur: float = 120.0,
+) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """Compare two Chromaprint fingerprints using inverted-index shift search.
+
+    Algorithm based on intro-skipper:
+    1. Build inverted indexes (fingerprint value → last position).
+    2. Find alignment shifts where matching points exist.
+    3. For each shift, XOR + popcount to find similar regions.
+    4. Pick the longest contiguous region within [min_dur, max_dur].
+
+    Returns ``((lhs_start, lhs_end), (rhs_start, rhs_end))`` or ``(None, None)``.
+    """
+    if len(lhs_fp) == 0 or len(rhs_fp) == 0:
+        return None, None
+
+    lhs_idx = _create_inverted_index(lhs_fp)
+    rhs_idx = _create_inverted_index(rhs_fp)
+
+    # Discover candidate alignment shifts via fuzzy index lookup.
+    shifts: set = set()
+    for point, lhs_pos in lhs_idx.items():
+        for off in range(-_CHROMAPRINT_INDEX_SHIFT, _CHROMAPRINT_INDEX_SHIFT + 1):
+            mod = (point + off) & 0xFFFFFFFF
+            if mod in rhs_idx:
+                shifts.add(rhs_idx[mod] - lhs_pos)
+
+    best_lhs: Optional[Tuple[float, float]] = None
+    best_rhs: Optional[Tuple[float, float]] = None
+    best_d = 0.0
+
+    for shift in shifts:
+        lr, rr = _find_contiguous_at_shift(lhs_fp, rhs_fp, shift)
+        if lr is None or rr is None:
+            continue
+        d = lr[1] - lr[0]
+        if d < min_dur or d > max_dur:
+            continue
+        if d > best_d:
+            best_d = d
+            best_lhs = lr
+            best_rhs = rr
+
+    if best_lhs is None:
+        return None, None
+
+    # Snap intro start to 0 when within 5 s of the beginning (no cold open).
+    if best_lhs[0] <= 5.0:
+        best_lhs = (0.0, best_lhs[1])
+    if best_rhs[0] <= 5.0:
+        best_rhs = (0.0, best_rhs[1])
+
+    return best_lhs, best_rhs
+
+
+# ── Chromaprint orchestrator ────────────────────────────────────────────────
+
+
+def _detect_by_chromaprint(
+    filepaths: List[str],
+    durations: Dict[str, float],
+    search_window: float = 300.0,
+    min_segment: float = 15.0,
+    max_segment: float = 120.0,
+) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
+    """Detect intro/outro boundaries using Chromaprint (intro-skipper algorithm).
+
+    For each pair of episodes the beginning fingerprints are compared to find
+    the shared intro and the *reversed* tail fingerprints are compared to find
+    the shared credits/outro.
+    """
+    start_time = time.monotonic()
+    stats = FingerprintStats(candidate_files=len(filepaths))
+
+    if len(filepaths) < 2:
+        logger.info("Chromaprint requires ≥2 files; got %d. Skipping.", len(filepaths))
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
+        return {}
+
+    intro_fps: Dict[str, np.ndarray] = {}
+    outro_fps: Dict[str, np.ndarray] = {}
+    valid_paths: List[str] = []
+
+    # ── Extract fingerprints for every episode ──
+    for fp in filepaths:
+        dur = durations.get(fp)
+        if dur is None:
+            logger.warning("Duration unknown for %s; skipping in Chromaprint pass", fp)
+            continue
+
+        intro_len = min(search_window, dur * 0.25, dur)
+        intro_fp, intro_cached = _extract_chromaprint(fp, 0.0, intro_len)
+
+        outro_start = max(0.0, dur - search_window)
+        outro_len = dur - outro_start
+        outro_fp, outro_cached = _extract_chromaprint(fp, outro_start, outro_len)
+
+        stats.cache_hits += int(intro_cached) + int(outro_cached)
+        stats.cache_misses += int(not intro_cached) + int(not outro_cached)
+
+        if intro_fp is not None and outro_fp is not None:
+            intro_fps[fp] = intro_fp
+            outro_fps[fp] = outro_fp[::-1].copy()  # reverse for credits detection
+            valid_paths.append(fp)
+        else:
+            logger.warning("Chromaprint extraction failed for %s", fp)
+
+    if len(valid_paths) < 2:
+        logger.warning("Need ≥2 Chromaprint fingerprints; got %d", len(valid_paths))
+        stats.valid_files = len(valid_paths)
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
+        return {}
+
+    stats.valid_files = len(valid_paths)
+    stats.jobs_submitted = len(valid_paths)
+    stats.workers = 1  # pairwise comparison is single-threaded
+
+    # ── Intro detection: pairwise comparison ──
+    intro_segments: Dict[str, Tuple[float, float]] = {}
+
+    remaining = list(valid_paths)
+    while remaining:
+        current = remaining.pop(0)
+        for other in remaining:
+            lr, rr = _compare_episodes_chromaprint(
+                intro_fps[current], intro_fps[other],
+                min_dur=min_segment, max_dur=max_segment,
+            )
+            if lr is None:
+                continue
+            # Keep longest per episode.
+            if current not in intro_segments or (lr[1] - lr[0]) > (intro_segments[current][1] - intro_segments[current][0]):
+                intro_segments[current] = lr
+            if other not in intro_segments or (rr[1] - rr[0]) > (intro_segments[other][1] - intro_segments[other][0]):
+                intro_segments[other] = rr
+            break  # first match found for *current*
+
+    # ── Outro detection: pairwise comparison on reversed fingerprints ──
+    outro_segments: Dict[str, Tuple[float, float]] = {}
+
+    remaining = list(valid_paths)
+    while remaining:
+        current = remaining.pop(0)
+        for other in remaining:
+            lr, rr = _compare_episodes_chromaprint(
+                outro_fps[current], outro_fps[other],
+                min_dur=min_segment,
+                max_dur=max(max_segment, search_window),
+            )
+            if lr is None:
+                continue
+            if current not in outro_segments or (lr[1] - lr[0]) > (outro_segments[current][1] - outro_segments[current][0]):
+                outro_segments[current] = lr
+            if other not in outro_segments or (rr[1] - rr[0]) > (outro_segments[other][1] - outro_segments[other][0]):
+                outro_segments[other] = rr
+            break
+
+    # ── Assemble per-episode results ──
+    results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
+
+    for fp in filepaths:
+        dur = durations.get(fp)
+        if dur is None:
+            continue
+
+        is_: Optional[float] = intro_segments[fp][0] if fp in intro_segments else None
+        ie: Optional[float] = intro_segments[fp][1] if fp in intro_segments else None
+
+        os_: Optional[float] = None
+        if fp in outro_segments:
+            # Convert reversed-fingerprint coordinates back to absolute time.
+            os_ = dur - outro_segments[fp][1]
+            if ie is not None and os_ < ie:
+                os_ = ie
+
+        if is_ is not None or ie is not None or os_ is not None:
+            results[fp] = (is_, ie, os_)
+            logger.debug(
+                "Chromaprint result for %s: intro=%.1fs–%.1fs, outro=%.1fs",
+                Path(fp).name,
+                is_ if is_ is not None else 0.0,
+                ie if ie is not None else 0.0,
+                os_ if os_ is not None else dur,
+            )
+
+    # ── Fill episodes that had no individual match with median values ──
+    if results:
+        ie_vals = [r[1] for r in results.values() if r[1] is not None]
+        is_vals = [r[0] for r in results.values() if r[0] is not None]
+        med_is = float(np.median(is_vals)) if is_vals else None
+        med_ie = float(np.median(ie_vals)) if ie_vals else None
+
+        os_from_end = [
+            durations[fp2] - results[fp2][2]
+            for fp2 in results
+            if results[fp2][2] is not None and fp2 in durations
+        ]
+        med_os_from_end = float(np.median(os_from_end)) if os_from_end else None
+
+        for fp in filepaths:
+            dur = durations.get(fp)
+            if dur is None or fp in results:
+                continue
+            os_val = (dur - med_os_from_end) if med_os_from_end is not None else None
+            if os_val is not None and med_ie is not None and os_val < med_ie:
+                os_val = med_ie
+            results[fp] = (med_is, med_ie, os_val)
+
+    logger.info(
+        "Chromaprint: %d intro(s), %d outro(s) detected across %d files",
+        len(intro_segments), len(outro_segments), len(valid_paths),
+    )
+
+    stats.elapsed_sec = time.monotonic() - start_time
+    _set_last_fingerprint_stats(stats)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -463,8 +971,28 @@ def detect_by_fingerprinting(
         Either boundary can be ``None`` when not confidently detected.
         Files with insufficient audio are omitted.
     """
+    # ── Chromaprint path (more accurate, inspired by intro-skipper) ──
+    if _check_fpcalc():
+        try:
+            result = _detect_by_chromaprint(
+                filepaths, durations, search_window, min_segment, max_segment,
+            )
+            if result:
+                return result
+            logger.info(
+                "Chromaprint detection found no boundaries; "
+                "falling back to chroma STFT fingerprinting"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Chromaprint detection failed (%s); "
+                "falling back to chroma STFT fingerprinting",
+                exc,
+            )
+
+    # ── Legacy chroma STFT path ──
     start_time = time.monotonic()
-    stats = FingerprintStats(candidate_files=min(len(filepaths), _MAX_FINGERPRINT_FILES))
+    stats = FingerprintStats(candidate_files=len(filepaths))
 
     if _librosa is None:
         stats.elapsed_sec = time.monotonic() - start_time
@@ -483,18 +1011,17 @@ def detect_by_fingerprinting(
         return {}
 
     sr = _FINGERPRINT_SR
-    candidate_paths = filepaths[:_MAX_FINGERPRINT_FILES]
     logger.info(
-        "Fingerprinting: using first %d episode(s), processing in parallel",
-        len(candidate_paths),
+        "Fingerprinting: computing fingerprints for %d episode(s) in parallel",
+        len(filepaths),
     )
 
-    intro_fps: List[np.ndarray] = []
-    outro_fps: List[np.ndarray] = []
+    intro_fps_map: Dict[str, np.ndarray] = {}
+    outro_fps_map: Dict[str, np.ndarray] = {}
     valid_paths: List[str] = []
 
     jobs: List[Tuple[str, float]] = []
-    for fp in candidate_paths:
+    for fp in filepaths:
         dur = durations.get(fp)
         if dur is None:
             logger.warning("Duration unknown for %s; skipping in fingerprint pass", fp)
@@ -530,16 +1057,9 @@ def detect_by_fingerprinting(
                 logger.warning("Could not extract audio from %s; skipping", path)
                 continue
 
-            intro_fps.append(intro_fp)
-            outro_fps.append(outro_fp)
+            intro_fps_map[path] = intro_fp
+            outro_fps_map[path] = outro_fp
             valid_paths.append(path)
-
-            if len(valid_paths) >= _MAX_FINGERPRINT_FILES:
-                logger.info(
-                    "Fingerprinting early exit: reached %d valid file(s)",
-                    _MAX_FINGERPRINT_FILES,
-                )
-                break
 
     if len(valid_paths) < 2:
         logger.warning("Not enough files with extractable audio for fingerprinting")
@@ -548,44 +1068,102 @@ def detect_by_fingerprinting(
         _set_last_fingerprint_stats(stats)
         return {}
 
-    intro_ends = _find_common_segment_end(intro_fps, sr, min_segment, max_segment)
-    if intro_ends is None:
+    # Use first N valid paths for cross-correlation segment detection
+    detection_paths = valid_paths[:_MAX_FINGERPRINT_FILES]
+    detection_intro_fps = [intro_fps_map[p] for p in detection_paths]
+
+    intro_bounds = _find_common_segment_bounds(detection_intro_fps, sr, min_segment, max_segment)
+    if intro_bounds is None:
         logger.info("Fingerprinting: could not detect a common intro segment")
 
     # Outro: same logic but fingerprints are reversed so that "end" is at frame 0
-    outro_fps_rev = [fp[:, ::-1] for fp in outro_fps]
-    outro_from_ends = _find_common_segment_end(outro_fps_rev, sr, min_segment, max_segment)
+    detection_outro_fps_rev = [outro_fps_map[p][:, ::-1] for p in detection_paths]
+    outro_bounds = _find_common_segment_bounds(detection_outro_fps_rev, sr, min_segment, max_segment)
 
-    # Build per-fingerprinted-episode lookup
-    fp_intro_map: Dict[str, float] = {}
+    # ── Intro: template-match for precise per-episode boundaries ──
+    hop_sec = _HOP_LENGTH / sr
+    fp_intro_start_map: Dict[str, float] = {}
+    fp_intro_end_map: Dict[str, float] = {}
+    if intro_bounds is not None:
+        intro_starts_list, intro_ends_list, seg_start, seg_len = intro_bounds
+        # Extract the detected common segment from the reference fingerprint
+        # with proportional padding so that the template captures transition
+        # frames at the edges of the theme song.
+        ref_fp = detection_intro_fps[0]
+        # Padding = 10% of segment length, clamped to [1 s, 10 s]
+        pad_sec = max(1.0, min(10.0, seg_len * hop_sec * 0.1))
+        pad_frames = int(pad_sec / hop_sec)
+        t_start = max(0, seg_start - pad_frames)
+        t_end = min(ref_fp.shape[1], seg_start + seg_len + pad_frames)
+        template = ref_fp[:, t_start : t_end]
+        # Offsets to correct for the padding so that the reported start/end
+        # align with the actual theme boundaries, not the padded edges.
+        front_pad_sec = (seg_start - t_start) * hop_sec
+        back_pad_sec = (t_end - (seg_start + seg_len)) * hop_sec
+
+        if template.shape[1] > 0:
+            for path in valid_paths:
+                ep_fp = intro_fps_map[path]
+                match = _match_template_position(template, ep_fp, sr)
+                if match is not None:
+                    fp_intro_start_map[path] = match[0] + front_pad_sec
+                    fp_intro_end_map[path] = match[1] - back_pad_sec
+                    logger.debug(
+                        "  Template match %s: intro %.1fs–%.1fs",
+                        Path(path).name,
+                        fp_intro_start_map[path],
+                        fp_intro_end_map[path],
+                    )
+
+    # ── Outro: template-match for precise per-episode boundaries ──
     fp_outro_from_end_map: Dict[str, float] = {}
-    if intro_ends is not None:
-        for path, val in zip(valid_paths, intro_ends):
-            fp_intro_map[path] = val
-    if outro_from_ends is not None:
-        for path, val in zip(valid_paths, outro_from_ends):
-            fp_outro_from_end_map[path] = val
+    if outro_bounds is not None:
+        _, _, out_seg_start, out_seg_len = outro_bounds
+        ref_outro_rev = detection_outro_fps_rev[0]
+        pad_sec = max(1.0, min(10.0, out_seg_len * hop_sec * 0.1))
+        pad_frames = int(pad_sec / hop_sec)
+        ot_start = max(0, out_seg_start - pad_frames)
+        ot_end = min(ref_outro_rev.shape[1], out_seg_start + out_seg_len + pad_frames)
+        outro_template = ref_outro_rev[:, ot_start : ot_end]
+        outro_front_pad_sec = (out_seg_start - ot_start) * hop_sec
 
-    # Median values for episodes that were not fingerprinted
-    median_intro = float(np.median(list(fp_intro_map.values()))) if fp_intro_map else None
+        if outro_template.shape[1] > 0:
+            for path in valid_paths:
+                ep_outro_rev = outro_fps_map[path][:, ::-1]
+                match = _match_template_position(outro_template, ep_outro_rev, sr)
+                if match is not None:
+                    from_end = match[0] + outro_front_pad_sec
+                    fp_outro_from_end_map[path] = from_end
+                    logger.debug(
+                        "  Template match outro %s: %.1fs from end",
+                        Path(path).name, from_end,
+                    )
+
+    # Median values for episodes without individual measurements
+    median_intro_start = float(np.median(list(fp_intro_start_map.values()))) if fp_intro_start_map else None
+    median_intro_end = float(np.median(list(fp_intro_end_map.values()))) if fp_intro_end_map else None
     median_outro_from_end = (
         float(np.median(list(fp_outro_from_end_map.values())))
         if fp_outro_from_end_map
         else None
     )
 
-    results: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
     for fp in filepaths:
         dur = durations.get(fp)
         if dur is None:
             continue
 
-        ie: Optional[float] = fp_intro_map.get(fp)
-        if ie is None and intro_ends is not None:
-            ie = median_intro
+        is_: Optional[float] = fp_intro_start_map.get(fp)
+        if is_ is None and intro_bounds is not None:
+            is_ = median_intro_start
+
+        ie: Optional[float] = fp_intro_end_map.get(fp)
+        if ie is None and intro_bounds is not None:
+            ie = median_intro_end
 
         ofe = fp_outro_from_end_map.get(fp)
-        if ofe is None and outro_from_ends is not None:
+        if ofe is None and outro_bounds is not None:
             ofe = median_outro_from_end
 
         if ofe is not None:
@@ -595,17 +1173,64 @@ def detect_by_fingerprinting(
         else:
             outro_start = None
 
-        results[fp] = (ie, outro_start)
+        results[fp] = (is_, ie, outro_start)
 
     logger.info(
-        "Fingerprinting result – intro_end=%s, outro_from_end=%s (per-episode, showing medians)",
-        f"{median_intro:.1f}s" if median_intro is not None else "N/A",
+        "Fingerprinting result – outro_from_end=%s (median); per-episode intro via template matching",
         f"{median_outro_from_end:.1f}s" if median_outro_from_end is not None else "N/A",
     )
     stats.valid_files = len(valid_paths)
+    stats.candidate_files = len(filepaths)
     stats.elapsed_sec = time.monotonic() - start_time
     _set_last_fingerprint_stats(stats)
     return results
+
+
+def _silence_cache_path(
+    filepath: str, silence_db: float, min_silence_len: float,
+) -> Optional[Path]:
+    """Return a stable cache path for silence detection results.
+
+    Returns ``None`` if the file cannot be stat'd (avoids caching
+    nonexistent/mock files).
+    """
+    try:
+        st = os.stat(filepath)
+        size = st.st_size
+        mtime_ns = st.st_mtime_ns
+    except OSError:
+        return None
+    key = "|".join((
+        filepath, f"{silence_db:.1f}", f"{min_silence_len:.3f}",
+        str(size), str(mtime_ns), _CACHE_VERSION,
+    ))
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return _SILENCE_CACHE_DIR / f"{digest}.json"
+
+
+def _load_cached_silence(path: Path) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """Load cached silence detection result if available."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return (data.get("intro_end"), data.get("outro_start"))
+    except Exception:  # pylint: disable=broad-except
+        return None
+
+
+def _save_cached_silence(
+    path: Path, intro_end: Optional[float], outro_start: Optional[float],
+) -> None:
+    """Persist silence detection result to cache (best-effort)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"intro_end": intro_end, "outro_start": outro_start}),
+            encoding="utf-8",
+        )
+    except Exception:  # pylint: disable=broad-except
+        return
 
 
 def detect_by_silence(
@@ -619,6 +1244,14 @@ def detect_by_silence(
     Returns ``(intro_end, outro_start)`` in seconds.  Either value may be
     ``None`` if the corresponding boundary could not be determined.
     """
+    # Check cache first
+    cache_path = _silence_cache_path(filepath, silence_db, min_silence_len)
+    if cache_path is not None:
+        cached = _load_cached_silence(cache_path)
+        if cached is not None:
+            logger.debug("Silence cache hit for %s", filepath)
+            return cached
+
     cmd = [
         "ffmpeg",
         "-i", filepath,
@@ -673,44 +1306,52 @@ def detect_by_silence(
         else:
             outro_start = candidate
 
+    _save_cached_silence(cache_path, intro_end, outro_start) if cache_path is not None else None
     return intro_end, outro_start
 
 
 def resolve_boundaries(
     filepath: str,
     cfg: "Config",  # type: ignore[name-defined]  # avoid circular import
-    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float]]],
+    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]],
     duration: Optional[float],
-) -> Tuple[float, float]:
-    """Return ``(intro_end, outro_start)`` for *filepath* using all strategies.
+) -> Tuple[float, float, float]:
+    """Return ``(intro_start, intro_end, outro_start)`` for *filepath*.
+
+    intro_start: where the intro/theme begins (content before this is kept).
+    intro_end: where the intro/theme ends (content after this is kept).
+    outro_start: where the outro/credits begin (content after this is removed).
 
     Strategy order:
     1. Per-file timestamps from config (most specific, always wins).
     2. Fingerprinting results (if available for this file).
     3. Silence detection.
     4. User-supplied intro_duration / outro_duration.
-    5. Defaults: 0 / duration (no trimming).
+    5. Defaults: 0 / 0 / duration (no trimming).
     """
     basename = Path(filepath).name
 
     # 1. Per-file config timestamps
     ts = cfg.timestamps.get(basename, {})
-    ts_intro = ts.get("intro_end")
+    ts_intro_start = ts.get("intro_start")
+    ts_intro_end = ts.get("intro_end")
     ts_outro = ts.get("outro_start")
-    if ts_intro is not None and ts_outro is not None:
+    if ts_intro_end is not None and ts_outro is not None:
         logger.debug("Using config timestamps for %s", basename)
-        return float(ts_intro), float(ts_outro)
+        intro_start = float(ts_intro_start) if ts_intro_start is not None else 0.0
+        return intro_start, float(ts_intro_end), float(ts_outro)
 
     # 2. Fingerprinting
-    fp_intro: Optional[float] = None
+    fp_intro_start: Optional[float] = None
+    fp_intro_end: Optional[float] = None
     fp_outro: Optional[float] = None
     if filepath in fingerprint_results:
-        fp_intro, fp_outro = fingerprint_results[filepath]
+        fp_intro_start, fp_intro_end, fp_outro = fingerprint_results[filepath]
 
     # 3. Silence detection (fall back when fingerprinting didn't run / failed)
     sil_intro: Optional[float] = None
     sil_outro: Optional[float] = None
-    if fp_intro is None or fp_outro is None:
+    if fp_intro_end is None or fp_outro is None:
         logger.debug("Running silence detection for %s", basename)
         sil_intro, sil_outro = detect_by_silence(
             filepath,
@@ -719,10 +1360,16 @@ def resolve_boundaries(
             duration=duration,
         )
 
-    # Merge: prefer fingerprinting over silence; prefer both over user durations
+    # Merge: prefer fingerprinting over silence; prefer both over user durations.
+    # intro_start is only available from fingerprinting or config timestamps.
+    intro_start = _coalesce(
+        ts_intro_start,
+        fp_intro_start,
+        0.0,
+    )
     intro_end = _coalesce(
-        ts_intro,
-        fp_intro,
+        ts_intro_end,
+        fp_intro_end,
         sil_intro,
         cfg.intro_duration,
         0.0,
@@ -743,7 +1390,7 @@ def resolve_boundaries(
     if outro_start is None:
         outro_start = duration or 0.0
 
-    return float(intro_end), float(outro_start)
+    return float(intro_start), float(intro_end), float(outro_start)
 
 
 def _coalesce(*values: Optional[float]) -> Optional[float]:

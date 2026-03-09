@@ -52,9 +52,11 @@ class Config:
         fingerprint_search_window: float = 300.0,
         use_fingerprinting: bool = True,
         log_file: Optional[str] = None,
+        workers: Optional[int] = None,
     ) -> None:
         self.intro_duration = intro_duration
         self.outro_duration = outro_duration
+        self.workers = workers
         # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
         self.timestamps: Dict[str, Dict[str, float]] = timestamps or {}
         self.mp3_bitrate = mp3_bitrate
@@ -162,6 +164,9 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
     )
     timestamps = config_file_data.get("timestamps", {})
 
+    workers_raw = getattr(args, "workers", None)
+    workers = int(workers_raw) if workers_raw is not None else None
+
     return Config(
         intro_duration=intro_duration,
         outro_duration=outro_duration,
@@ -172,4 +177,5 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         fingerprint_search_window=float(fingerprint_search_window),
         use_fingerprinting=getattr(args, "fingerprint", True),
         log_file=getattr(args, "log_file", None),
+        workers=workers,
     )

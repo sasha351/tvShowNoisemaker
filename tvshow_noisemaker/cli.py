@@ -17,12 +17,14 @@ Detection strategy (in priority order)
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import logging
 import os
 import re
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -222,6 +224,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of parallel ffmpeg workers for file processing "
+            "(default: half of CPU count).  Use 1 for sequential processing."
+        ),
+    )
+
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable debug-level logging.",
@@ -309,12 +322,16 @@ def run(args: argparse.Namespace) -> int:
 
     # Get durations for all files (needed by fingerprinting and outro detection)
     durations: Dict[str, float] = {}
-    for fp in video_files:
-        dur = get_duration(fp)
-        if dur is not None:
-            durations[fp] = dur
-        else:
-            app_log.warning("Could not determine duration for %s; will attempt to process anyway", fp)
+    dur_workers = min(len(video_files), max(1, (os.cpu_count() or 2)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=dur_workers) as pool:
+        future_to_fp = {pool.submit(get_duration, fp): fp for fp in video_files}
+        for future in concurrent.futures.as_completed(future_to_fp):
+            fp = future_to_fp[future]
+            dur = future.result()
+            if dur is not None:
+                durations[fp] = dur
+            else:
+                app_log.warning("Could not determine duration for %s; will attempt to process anyway", fp)
 
     # Fingerprint pass (batch)
     fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
@@ -357,8 +374,9 @@ def run(args: argparse.Namespace) -> int:
     total_count = len(video_files)
     batch_start = time.monotonic()
 
-    con.info("Starting conversion  (%d files, output → %s)", total_count, output_dir)
-    _print_progress_bar(0, total_count, 0, 0, 0, batch_start)
+    # ── Phase 1: resolve boundaries for all files (includes silence detection) ──
+    # (filepath, basename, intro_start, intro_end, outro_start, content_dur, trimmed)
+    jobs: List[Tuple[str, str, float, float, float, float, float]] = []
 
     for filepath in video_files:
         basename = Path(filepath).name
@@ -368,16 +386,17 @@ def run(args: argparse.Namespace) -> int:
         duration = durations.get(filepath)
 
         # Log what fingerprinting found for this file (if anything)
-        fp_intro, fp_outro = fingerprint_results.get(filepath, (None, None))
-        if fp_intro is not None or fp_outro is not None:
+        fp_is, fp_ie, fp_os = fingerprint_results.get(filepath, (None, None, None))
+        if fp_ie is not None or fp_os is not None:
             app_log.info(
-                "  Fingerprint boundaries: intro_end=%.1fs, outro_start=%s",
-                fp_intro if fp_intro is not None else 0.0,
-                f"{fp_outro:.1f}s" if fp_outro is not None else "N/A",
+                "  Fingerprint boundaries: intro=%.1fs–%.1fs, outro_start=%s",
+                fp_is if fp_is is not None else 0.0,
+                fp_ie if fp_ie is not None else 0.0,
+                f"{fp_os:.1f}s" if fp_os is not None else "N/A",
             )
 
         try:
-            intro_end, outro_start = resolve_boundaries(
+            intro_start, intro_end, outro_start = resolve_boundaries(
                 filepath,
                 cfg=cfg,
                 fingerprint_results=fingerprint_results,
@@ -387,14 +406,6 @@ def run(args: argparse.Namespace) -> int:
             reason = f"Boundary detection error: {exc}"
             app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
-            _print_progress_bar(
-                len(processed_files) + len(skipped) + len(failed),
-                total_count,
-                len(processed_files),
-                len(skipped),
-                len(failed),
-                batch_start,
-            )
             continue
 
         # If no strategy could determine meaningful boundaries, skip instead of
@@ -406,8 +417,8 @@ def run(args: argparse.Namespace) -> int:
         has_user_duration_override = (
             cfg.intro_duration is not None or cfg.outro_duration is not None
         )
-        fp_intro, fp_outro = fingerprint_results.get(filepath, (None, None))
-        has_fingerprint_boundary = fp_intro is not None or fp_outro is not None
+        fp_is, fp_ie, fp_os = fingerprint_results.get(filepath, (None, None, None))
+        has_fingerprint_boundary = fp_ie is not None or fp_os is not None
         is_unresolved_defaults = (
             duration is not None
             and abs(intro_end) < 1e-6
@@ -423,26 +434,24 @@ def run(args: argparse.Namespace) -> int:
             reason = "No intro/outro boundaries detected (skipped to avoid full-file conversion)"
             app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
-            _print_progress_bar(
-                len(processed_files) + len(skipped) + len(failed),
-                total_count,
-                len(processed_files),
-                len(skipped),
-                len(failed),
-                batch_start,
-            )
             continue
 
-        content_duration = outro_start - intro_end
+        # Content kept = cold open + post-intro content.
+        content_duration = intro_start + (outro_start - intro_end)
         trimmed = (duration or 0.0) - content_duration
 
-        app_log.info(
-            "  Trim: %.1fs → %.1fs  (keeping %.1fs, removing %.1fs)",
-            intro_end,
-            outro_start,
-            content_duration,
-            max(trimmed, 0.0),
-        )
+        if intro_start > 1.0 and intro_start < intro_end:
+            app_log.info(
+                "  Cut intro: keep [0–%.1fs] + [%.1fs–%.1fs]  (keeping %.1fs, removing %.1fs)",
+                intro_start, intro_end, outro_start,
+                content_duration, max(trimmed, 0.0),
+            )
+        else:
+            app_log.info(
+                "  Trim: %.1fs → %.1fs  (keeping %.1fs, removing %.1fs)",
+                intro_end, outro_start,
+                content_duration, max(trimmed, 0.0),
+            )
 
         if outro_start <= intro_end:
             reason = (
@@ -451,63 +460,77 @@ def run(args: argparse.Namespace) -> int:
             )
             app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
-            _print_progress_bar(
-                len(processed_files) + len(skipped) + len(failed),
-                total_count,
-                len(processed_files),
-                len(skipped),
-                len(failed),
-                batch_start,
-            )
             continue
 
+        jobs.append((filepath, basename, intro_start, intro_end, outro_start, content_duration, trimmed))
+
+    # ── Phase 2: process files in parallel ──────────────────────────────────
+    max_workers = cfg.workers or max(1, (os.cpu_count() or 2) // 2)
+    max_workers = min(max_workers, len(jobs)) if jobs else 1
+    progress_lock = threading.Lock()
+    done_count = len(skipped)  # skipped files count as "done" for progress
+
+    con.info(
+        "Starting conversion  (%d files, %d to encode, %d workers, output → %s)",
+        total_count, len(jobs), max_workers, output_dir,
+    )
+    _print_progress_bar(done_count, total_count, 0, len(skipped), 0, batch_start)
+
+    def _encode_one(filepath: str, basename: str, intro_start: float,
+                    intro_end: float, outro_start: float,
+                    content_duration: float, trimmed: float) -> tuple:
         output_path = build_output_path(filepath, str(output_dir))
         file_start = time.monotonic()
-
-        try:
-            process_file(
-                input_path=filepath,
-                output_path=output_path,
-                intro_end=intro_end,
-                outro_start=outro_start,
-                mp3_bitrate=cfg.mp3_bitrate,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            reason = str(exc)
-            app_log.error("  ✗ Failed – %s", reason)
-            failed.append((basename, reason))
-            _print_progress_bar(
-                len(processed_files) + len(skipped) + len(failed),
-                total_count,
-                len(processed_files),
-                len(skipped),
-                len(failed),
-                batch_start,
-            )
-            continue
-
+        process_file(
+            input_path=filepath,
+            output_path=output_path,
+            intro_end=intro_end,
+            outro_start=outro_start,
+            intro_start=intro_start,
+            mp3_bitrate=cfg.mp3_bitrate,
+        )
         file_elapsed = time.monotonic() - file_start
         out_size = _file_size(output_path)
-        total_output_bytes += out_size
-        total_content_secs += content_duration
-        total_trimmed_secs += max(trimmed, 0.0)
-        processed_files.append(basename)
+        return basename, file_elapsed, output_path, out_size, content_duration, trimmed
 
-        app_log.info(
-            "  ✓ Done in %.1fs → %s (%s)",
-            file_elapsed,
-            Path(output_path).name,
-            _fmt_bytes(out_size),
-        )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_encode_one, fp, bn, is_, ie, os_, cd, tr): (fp, bn)
+            for fp, bn, is_, ie, os_, cd, tr in jobs
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            fp, basename = future_map[future]
+            try:
+                basename, file_elapsed, output_path, out_size, content_duration, trimmed = future.result()
+                with progress_lock:
+                    total_output_bytes += out_size
+                    total_content_secs += content_duration
+                    total_trimmed_secs += max(trimmed, 0.0)
+                    processed_files.append(basename)
 
-        _print_progress_bar(
-            len(processed_files) + len(skipped) + len(failed),
-            total_count,
-            len(processed_files),
-            len(skipped),
-            len(failed),
-            batch_start,
-        )
+                app_log.info(
+                    "  ✓ Done in %.1fs → %s (%s)",
+                    file_elapsed,
+                    Path(output_path).name,
+                    _fmt_bytes(out_size),
+                )
+
+            except Exception as exc:  # pylint: disable=broad-except
+                reason = str(exc)
+                app_log.error("  ✗ Failed – %s: %s", basename, reason)
+                with progress_lock:
+                    failed.append((basename, reason))
+
+            with progress_lock:
+                done_count = len(processed_files) + len(skipped) + len(failed)
+                _print_progress_bar(
+                    done_count,
+                    total_count,
+                    len(processed_files),
+                    len(skipped),
+                    len(failed),
+                    batch_start,
+                )
 
     # Finish progress line before summary logging
     sys.stdout.write("\n")

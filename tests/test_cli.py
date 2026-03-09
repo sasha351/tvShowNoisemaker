@@ -35,6 +35,7 @@ def _make_args(
     fingerprint_search_window=None,
     benchmark_fingerprint=False,
     verbose=False,
+    workers=None,
 ):
     """Construct a namespace that matches what argparse would produce."""
     class _Args:
@@ -53,6 +54,7 @@ def _make_args(
     a.fingerprint_search_window = fingerprint_search_window
     a.benchmark_fingerprint = benchmark_fingerprint
     a.verbose = verbose
+    a.workers = workers
     return a
 
 
@@ -86,6 +88,16 @@ def test_parser_custom_bitrate():
 def test_parser_benchmark_fingerprint_flag():
     args = _parse("--input-dir /in --output-dir /out --benchmark-fingerprint")
     assert args.benchmark_fingerprint is True
+
+
+def test_parser_workers_flag():
+    args = _parse("--input-dir /in --output-dir /out --workers 4")
+    assert args.workers == 4
+
+
+def test_parser_workers_default_none():
+    args = _parse("--input-dir /in --output-dir /out")
+    assert args.workers is None
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +140,7 @@ def test_run_single_file_success(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
         patch("tvshow_noisemaker.cli.process_file") as mock_proc,
     ):
         exit_code = run(args)
@@ -152,7 +164,7 @@ def test_run_single_file_process_failure(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
         patch("tvshow_noisemaker.cli.process_file", side_effect=RuntimeError("ffmpeg failed")),
     ):
         exit_code = run(args)
@@ -180,7 +192,7 @@ def test_run_skips_invalid_boundaries(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(3000.0, 100.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 3000.0, 100.0)),
         patch("tvshow_noisemaker.cli.process_file") as mock_proc,
     ):
         exit_code = run(args)
@@ -203,7 +215,7 @@ def test_run_skips_unresolved_default_boundaries(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 2700.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 0.0, 2700.0)),
         patch("tvshow_noisemaker.cli.process_file") as mock_proc,
     ):
         exit_code = run(args)
@@ -227,7 +239,7 @@ def test_run_allows_explicit_user_no_trim(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 2700.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 0.0, 2700.0)),
         patch("tvshow_noisemaker.cli.process_file") as mock_proc,
     ):
         exit_code = run(args)
@@ -293,7 +305,7 @@ def test_run_creates_log_file(tmp_path):
     with (
         patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
-        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
         patch("tvshow_noisemaker.cli.process_file"),
     ):
         run(args)
@@ -315,3 +327,93 @@ def test_setup_logging_default_console_level_info(tmp_path):
     assert stream_handlers, "Expected at least one stream handler on console logger"
     # Stream handler level should default to INFO unless --verbose is set.
     assert any(h.level == logging.INFO for h in stream_handlers)
+
+
+# ---------------------------------------------------------------------------
+# run() – parallel processing
+# ---------------------------------------------------------------------------
+
+
+def test_run_parallel_multiple_files(tmp_path):
+    """Verify that multiple files are processed and workers > 1 works."""
+    for name in ("ep01.mp4", "ep02.mp4", "ep03.mp4"):
+        (tmp_path / name).touch()
+
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        workers=2,
+    )
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    assert mock_proc.call_count == 3
+
+
+def test_run_workers_one_sequential(tmp_path):
+    """Workers=1 should still process all files."""
+    for name in ("ep01.mp4", "ep02.mp4"):
+        (tmp_path / name).touch()
+
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        workers=1,
+    )
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    assert mock_proc.call_count == 2
+
+
+def test_run_parallel_one_failure_does_not_crash_batch(tmp_path):
+    """One file failing shouldn't prevent others from processing."""
+    for name in ("ep01.mp4", "ep02.mp4"):
+        (tmp_path / name).touch()
+
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        workers=2,
+    )
+
+    call_count = 0
+
+    def _fail_first(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if "ep01" in kwargs.get("input_path", ""):
+            raise RuntimeError("ffmpeg failed for ep01")
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.process_file", side_effect=_fail_first) as mock_proc,
+    ):
+        exit_code = run(args)
+
+    # At least one failure → non-zero exit
+    assert exit_code != 0
+    # But both files should have been attempted
+    assert mock_proc.call_count == 2

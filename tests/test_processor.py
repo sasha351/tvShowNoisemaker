@@ -119,3 +119,45 @@ def test_process_file_raises_if_ffmpeg_not_found(tmp_path):
                 intro_end=30.0,
                 outro_start=2550.0,
             )
+
+
+def test_process_file_concat_with_cold_open(tmp_path):
+    """When intro_start >= 1s and < intro_end, ffmpeg should use filter_complex."""
+    output_path = str(tmp_path / "ep01.mp3")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=output_path,
+            intro_end=165.0,
+            outro_start=2550.0,
+            intro_start=120.0,
+            mp3_bitrate=192,
+        )
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert "-filter_complex" in cmd
+    fc_idx = cmd.index("-filter_complex")
+    fc_arg = cmd[fc_idx + 1]
+    assert "atrim=start=0:end=120.0" in fc_arg
+    assert "atrim=start=165.0:end=2550.0" in fc_arg
+    assert "concat=n=2:v=0:a=1" in fc_arg
+
+
+def test_process_file_simple_when_no_cold_open(tmp_path):
+    """When intro_start is 0 (default), use simple seek-based command."""
+    output_path = str(tmp_path / "ep01.mp3")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=output_path,
+            intro_end=30.0,
+            outro_start=2550.0,
+            intro_start=0.0,
+        )
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert "-filter_complex" not in cmd
+    assert "-ss" in cmd
+    assert "30.0" in cmd

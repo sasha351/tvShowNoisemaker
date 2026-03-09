@@ -9,10 +9,11 @@ trimmed `.mp3` files with intros and outros removed.
 
 - **Batch processing** – point it at a folder; every video file is processed automatically.
 - **Wide format support** – accepts `.mp4`, `.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`, `.m4v`, `.ts`, `.mpg`, `.mpeg`, `.3gp`, `.ogv`, `.vob`.
-- **Three detection strategies** (in priority order):
-    1. **Audio fingerprinting** (librosa chroma features) – identifies identical/near-identical intro and outro music from the first 5 episodes. Fingerprinting runs in parallel and caches fingerprints on disk to speed up repeat runs.
-  2. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
-  3. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
+- **Four detection strategies** (in priority order):
+    1. **Chromaprint fingerprinting** (`fpcalc`) – primary method. Uses an inverted-index + XOR/popcount contiguous-match algorithm (inspired by Intro Skipper) to find shared intro/outro segments across episodes.
+    2. **Audio fingerprinting fallback** (librosa chroma features) – used automatically when `fpcalc` is unavailable or Chromaprint cannot determine boundaries.
+    3. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
+    4. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
 - **Configurable MP3 bitrate** (default 192 kbps).
 - **Skip + log** – failed or invalid files are skipped and logged; the batch never crashes.
 - **Safe detection fallback** – if no intro/outro boundary can be detected, that file is skipped instead of converting the full episode.
@@ -24,7 +25,22 @@ trimmed `.mp3` files with intros and outros removed.
 
 - Python ≥ 3.9
 - **ffmpeg & ffprobe** – required for all audio processing
+- **Chromaprint / `fpcalc`** (recommended) - required for the new primary fingerprinting path
 - Python packages (installed automatically): `librosa`, `numpy`, `static-ffmpeg`
+
+### Chromaprint (`fpcalc`)
+
+The detector now prefers `fpcalc` (Chromaprint) when available because it is
+more robust for intro/outro matching.
+
+| Platform | Command |
+|---|---|
+| macOS (Homebrew) | `brew install chromaprint` |
+| Ubuntu / Debian | `sudo apt install chromaprint-tools` |
+| Fedora | `sudo dnf install chromaprint-tools` |
+
+If `fpcalc` is not installed, the tool automatically falls back to the legacy
+librosa-based fingerprinting path.
 
 ### ffmpeg
 
@@ -69,7 +85,7 @@ This will install all dependencies including `static-ffmpeg`, which provides
 ## Quick Start
 
 ```bash
-# Basic usage – auto-detect intros/outros via fingerprinting
+# Basic usage – auto-detect intros/outros via Chromaprint fingerprinting
 tvshow-noisemaker --input-dir /path/to/episodes --output-dir /path/to/mp3s
 
 # Disable fingerprinting, rely on silence detection only
@@ -148,13 +164,30 @@ CLI flags override config-file values.
 
 | Method | Accuracy | Speed | Requirements |
 |---|---|---|---|
-| Audio fingerprinting | ★★★★★ | ★★☆☆☆ (CPU-bound) | ≥ 2 episodes, librosa |
+| Chromaprint fingerprinting | ★★★★★ | ★★★★☆ | >= 2 episodes, `fpcalc` |
+| Audio fingerprinting fallback (librosa) | ★★★★☆ | ★★☆☆☆ (CPU-bound) | >= 2 episodes, librosa |
 | Silence detection | ★★★☆☆ | ★★★★★ | ffmpeg |
 | User timestamps | ★★★★★ | ★★★★★ | Manual inspection |
 
 **Recommendation**: Use the default fingerprinting for a full season folder.
 If you only have a single episode, provide `--intro-duration` and
 `--outro-duration` or a `--config` timestamps file.
+
+---
+
+## Attribution
+
+The Chromaprint matching approach in this project was inspired by the Jellyfin
+plugin [intro-skipper/intro-skipper](https://github.com/intro-skipper/intro-skipper),
+especially its inverted-index shift search and contiguous-match logic for
+intro/credits detection.
+
+Intro Skipper is licensed under GPL-3.0-only. This repository does not bundle
+or vend Intro Skipper source; the logic here is a clean Python adaptation of
+the algorithmic approach.
+
+This project is an independent Python implementation adapted for
+`tvshow_noisemaker` CLI workflows.
 
 ---
 
