@@ -68,6 +68,33 @@ def test_process_file_success(tmp_path):
     assert output_path in cmd
 
 
+def test_process_file_writes_metadata(tmp_path):
+    output_path = str(tmp_path / "ep01.mp3")
+    metadata = {
+        "artist": "The Office",
+        "album": "Season 2",
+        "title": "Episode 03 - Office Olympics",
+        "track": "3",
+        "genre": "TV Show",
+    }
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=output_path,
+            intro_end=30.0,
+            outro_start=2550.0,
+            metadata=metadata,
+        )
+    cmd = mock_run.call_args[0][0]
+    assert "-id3v2_version" in cmd
+    assert "artist=The Office" in cmd
+    assert "album=Season 2" in cmd
+    assert "title=Episode 03 - Office Olympics" in cmd
+    assert "track=3" in cmd
+    assert "genre=TV Show" in cmd
+
+
 def test_process_file_creates_output_dir(tmp_path):
     nested_output = str(tmp_path / "nested" / "deep" / "ep01.mp3")
     with patch("subprocess.run") as mock_run:

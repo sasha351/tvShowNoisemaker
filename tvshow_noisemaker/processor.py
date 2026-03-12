@@ -27,6 +27,7 @@ def process_file(
     outro_start: float,
     intro_start: float = 0.0,
     mp3_bitrate: int = 192,
+    metadata: Optional[dict[str, str]] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -46,6 +47,8 @@ def process_file(
         the same as a simple seek to *intro_end*.
     mp3_bitrate:
         MP3 encoding bitrate in kbps (e.g. 192).
+    metadata:
+        Optional output tags to write into the MP3 with ffmpeg.
 
     Raises
     ------
@@ -69,13 +72,13 @@ def process_file(
         cmd = _build_concat_cmd(
             input_path, output_path,
             intro_start, intro_end, outro_start,
-            mp3_bitrate,
+            mp3_bitrate, metadata,
         )
     else:
         cmd = _build_simple_cmd(
             input_path, output_path,
             intro_end, outro_start,
-            mp3_bitrate,
+            mp3_bitrate, metadata,
         )
 
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
@@ -111,10 +114,11 @@ def _build_simple_cmd(
     intro_end: float,
     outro_start: float,
     mp3_bitrate: int,
+    metadata: Optional[dict[str, str]] = None,
 ) -> list:
     """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
     duration = outro_start - intro_end
-    return [
+    cmd = [
         "ffmpeg",
         "-y",
         "-ss", str(intro_end),
@@ -125,8 +129,10 @@ def _build_simple_cmd(
         "-acodec", "libmp3lame",
         "-ab", f"{mp3_bitrate}k",
         "-ac", "2",
-        output_path,
     ]
+    cmd.extend(_build_metadata_args(metadata))
+    cmd.append(output_path)
+    return cmd
 
 
 def _build_concat_cmd(
@@ -136,6 +142,7 @@ def _build_concat_cmd(
     intro_end: float,
     outro_start: float,
     mp3_bitrate: int,
+    metadata: Optional[dict[str, str]] = None,
 ) -> list:
     """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
     filter_complex = (
@@ -143,7 +150,7 @@ def _build_concat_cmd(
         f"[0:a]atrim=start={intro_end}:end={outro_start},asetpts=PTS-STARTPTS[post];"
         f"[pre][post]concat=n=2:v=0:a=1[out]"
     )
-    return [
+    cmd = [
         "ffmpeg",
         "-y",
         "-i", input_path,
@@ -153,8 +160,22 @@ def _build_concat_cmd(
         "-acodec", "libmp3lame",
         "-ab", f"{mp3_bitrate}k",
         "-ac", "2",
-        output_path,
     ]
+    cmd.extend(_build_metadata_args(metadata))
+    cmd.append(output_path)
+    return cmd
+
+
+def _build_metadata_args(metadata: Optional[dict[str, str]]) -> list[str]:
+    if not metadata:
+        return []
+
+    args = ["-id3v2_version", "3"]
+    for key in ("artist", "album", "title", "track", "genre"):
+        value = metadata.get(key)
+        if value:
+            args.extend(["-metadata", f"{key}={value}"])
+    return args
 
 
 def build_output_path(input_path: str, output_dir: str) -> str:

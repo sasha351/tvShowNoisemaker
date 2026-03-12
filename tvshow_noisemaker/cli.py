@@ -36,6 +36,7 @@ from tvshow_noisemaker.detector import (
     get_duration,
     resolve_boundaries,
 )
+from tvshow_noisemaker.metadata import infer_track_metadata
 from tvshow_noisemaker.processor import build_output_path, process_file
 
 # Video formats supported by ffmpeg that we accept as input.
@@ -480,6 +481,7 @@ def run(args: argparse.Namespace) -> int:
                     intro_end: float, outro_start: float,
                     content_duration: float, trimmed: float) -> tuple:
         output_path = build_output_path(filepath, str(output_dir))
+        metadata = infer_track_metadata(filepath, str(input_dir))
         file_start = time.monotonic()
         process_file(
             input_path=filepath,
@@ -488,6 +490,7 @@ def run(args: argparse.Namespace) -> int:
             outro_start=outro_start,
             intro_start=intro_start,
             mp3_bitrate=cfg.mp3_bitrate,
+            metadata=metadata,
         )
         file_elapsed = time.monotonic() - file_start
         out_size = _file_size(output_path)

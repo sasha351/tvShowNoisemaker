@@ -15,6 +15,7 @@ trimmed `.mp3` files with intros and outros removed.
     3. **Silence detection** (ffmpeg `silencedetect`) – falls back to silence boundaries when fingerprinting fails or only one file is provided.
     4. **User-supplied timestamps/durations** – a per-episode timestamp table in the config file, or global `--intro-duration` / `--outro-duration` flags.
 - **Configurable MP3 bitrate** (default 192 kbps).
+- **Automatic MP3 tagging** – writes Artist, Album, Title, Track Number, and Genre metadata from the show folder and episode filename.
 - **Skip + log** – failed or invalid files are skipped and logged; the batch never crashes.
 - **Safe detection fallback** – if no intro/outro boundary can be detected, that file is skipped instead of converting the full episode.
 - **Optional JSON config file** for reproducible runs.
@@ -203,4 +204,5 @@ pytest
 ## Output
 
 - One `.mp3` per input video file, same filename, written to `--output-dir`.
+- Output MP3s are tagged automatically: Artist = show name, Album = season, Title = episode name/number, Track = episode number, Genre = `TV Show`.
 - A log file is always created (auto-named in `--output-dir` unless `--log-file` is set) listing detailed processing, skipped files, and failures.

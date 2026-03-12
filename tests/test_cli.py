@@ -126,13 +126,14 @@ def test_run_input_dir_not_found(tmp_path):
 
 
 def test_run_single_file_success(tmp_path):
-    # Create a fake .mp4 file
-    ep = tmp_path / "ep01.mp4"
+    show_dir = tmp_path / "The Office" / "Season 2"
+    show_dir.mkdir(parents=True)
+    ep = show_dir / "The.Office.S02E03.Office.Olympics.mp4"
     ep.touch()
 
     out_dir = tmp_path / "out"
     args = _make_args(
-        input_dir=str(tmp_path),
+        input_dir=str(show_dir),
         output_dir=str(out_dir),
         fingerprint=False,  # skip fingerprinting (requires ≥2 files)
     )
@@ -147,8 +148,15 @@ def test_run_single_file_success(tmp_path):
 
     assert exit_code == 0
     mock_proc.assert_called_once()
-    call_kwargs = mock_proc.call_args
-    assert str(ep) in str(call_kwargs)
+    _, kwargs = mock_proc.call_args
+    assert kwargs["input_path"] == str(ep)
+    assert kwargs["metadata"] == {
+        "artist": "The Office",
+        "album": "Season 2",
+        "title": "Episode 03 - Office Olympics",
+        "track": "3",
+        "genre": "TV Show",
+    }
 
 
 def test_run_single_file_process_failure(tmp_path):
