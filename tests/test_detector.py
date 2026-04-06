@@ -1,6 +1,8 @@
 """Tests for tvshow_noisemaker.detector."""
 
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch, call
 
 import numpy as np
@@ -8,6 +10,7 @@ import pytest
 
 from tvshow_noisemaker.detector import (
     _coalesce,
+    _detect_by_chromaprint,
     _compare_episodes_chromaprint,
     _create_inverted_index,
     _find_alignment_offset,
@@ -610,3 +613,35 @@ def test_find_contiguous_at_shift_no_match():
     b = np.array([0xFFFFFFFF] * 100, dtype=np.uint32)
     lr, rr = _find_contiguous_at_shift(a, b, shift=0)
     assert lr is None and rr is None
+
+
+def test_detect_by_chromaprint_parallel_extraction_deterministic_order():
+    """Chromaprint extraction should run concurrently and preserve filepath order."""
+    filepaths = [f"/show/ep{i:02d}.mp4" for i in range(1, 5)]
+    durations = {fp: 1800.0 for fp in filepaths}
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def _fake_extract(_fp: str, _start: float, _duration: float):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return np.arange(200, dtype=np.uint32), False
+
+    with (
+        patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=_fake_extract),
+        patch(
+            "tvshow_noisemaker.detector._compare_episodes_chromaprint",
+            return_value=((0.0, 30.0), (0.0, 30.0)),
+        ),
+    ):
+        results = _detect_by_chromaprint(filepaths, durations)
+
+    assert max_active > 1
+    assert list(results.keys()) == filepaths

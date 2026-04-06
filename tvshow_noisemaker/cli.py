@@ -280,6 +280,10 @@ def _ensure_ffmpeg_on_path(log: logging.Logger) -> bool:
 def run(args: argparse.Namespace) -> int:
     """Main processing logic.  Returns an exit code (0 = success)."""
     run_start = time.monotonic()
+    duration_probe_sec = 0.0
+    fingerprint_sec = 0.0
+    boundary_sec = 0.0
+    encode_sec = 0.0
 
     # Create output dir early so we can write the log file there
     output_dir = Path(args.output_dir)
@@ -324,6 +328,7 @@ def run(args: argparse.Namespace) -> int:
     # Get durations for all files (needed by fingerprinting and outro detection)
     durations: Dict[str, float] = {}
     dur_workers = min(len(video_files), max(1, (os.cpu_count() or 2)))
+    duration_stage_start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=dur_workers) as pool:
         future_to_fp = {pool.submit(get_duration, fp): fp for fp in video_files}
         for future in concurrent.futures.as_completed(future_to_fp):
@@ -333,11 +338,13 @@ def run(args: argparse.Namespace) -> int:
                 durations[fp] = dur
             else:
                 app_log.warning("Could not determine duration for %s; will attempt to process anyway", fp)
+    duration_probe_sec = time.monotonic() - duration_stage_start
 
     # Fingerprint pass (batch)
-    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
     if cfg.use_fingerprinting and len(video_files) >= 2:
         con.info("Running audio fingerprinting across %d episodes…", len(video_files))
+        fingerprint_stage_start = time.monotonic()
         try:
             fingerprint_results = detect_by_fingerprinting(
                 video_files,
@@ -364,6 +371,8 @@ def run(args: argparse.Namespace) -> int:
                 "(results may be less accurate)",
                 exc,
             )
+        finally:
+            fingerprint_sec = time.monotonic() - fingerprint_stage_start
 
     # Per-file processing
     skipped: List[Tuple[str, str]] = []
@@ -378,6 +387,42 @@ def run(args: argparse.Namespace) -> int:
     # ── Phase 1: resolve boundaries for all files (includes silence detection) ──
     # (filepath, basename, intro_start, intro_end, outro_start, content_dur, trimmed)
     jobs: List[Tuple[str, str, float, float, float, float, float]] = []
+
+    def _resolve_one(fp: str) -> Tuple[str, Tuple[float, float, float]]:
+        dur = durations.get(fp)
+        bounds = resolve_boundaries(
+            fp,
+            cfg=cfg,
+            fingerprint_results=fingerprint_results,
+            duration=dur,
+        )
+        return fp, bounds
+
+    boundary_results: Dict[str, Tuple[float, float, float]] = {}
+    boundary_errors: Dict[str, str] = {}
+    boundary_workers = cfg.workers or max(1, (os.cpu_count() or 2) // 2)
+    boundary_workers = min(boundary_workers, len(video_files))
+    boundary_stage_start = time.monotonic()
+
+    if boundary_workers <= 1:
+        for filepath in video_files:
+            try:
+                _, bounds = _resolve_one(filepath)
+                boundary_results[filepath] = bounds
+            except Exception as exc:  # pylint: disable=broad-except
+                boundary_errors[filepath] = f"Boundary detection error: {exc}"
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=boundary_workers) as pool:
+            future_map = {pool.submit(_resolve_one, fp): fp for fp in video_files}
+            for future in concurrent.futures.as_completed(future_map):
+                filepath = future_map[future]
+                try:
+                    _, bounds = future.result()
+                    boundary_results[filepath] = bounds
+                except Exception as exc:  # pylint: disable=broad-except
+                    boundary_errors[filepath] = f"Boundary detection error: {exc}"
+
+    boundary_sec = time.monotonic() - boundary_stage_start
 
     for filepath in video_files:
         basename = Path(filepath).name
@@ -396,18 +441,13 @@ def run(args: argparse.Namespace) -> int:
                 f"{fp_os:.1f}s" if fp_os is not None else "N/A",
             )
 
-        try:
-            intro_start, intro_end, outro_start = resolve_boundaries(
-                filepath,
-                cfg=cfg,
-                fingerprint_results=fingerprint_results,
-                duration=duration,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            reason = f"Boundary detection error: {exc}"
+        if filepath in boundary_errors:
+            reason = boundary_errors[filepath]
             app_log.warning("  ✗ Skipped – %s", reason)
             skipped.append((basename, reason))
             continue
+
+        intro_start, intro_end, outro_start = boundary_results[filepath]
 
         # If no strategy could determine meaningful boundaries, skip instead of
         # silently converting the full file with intro/outro still included.
@@ -496,6 +536,7 @@ def run(args: argparse.Namespace) -> int:
         out_size = _file_size(output_path)
         return basename, file_elapsed, output_path, out_size, content_duration, trimmed
 
+    encode_stage_start = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_map = {
             pool.submit(_encode_one, fp, bn, is_, ie, os_, cd, tr): (fp, bn)
@@ -534,6 +575,7 @@ def run(args: argparse.Namespace) -> int:
                     len(failed),
                     batch_start,
                 )
+    encode_sec = time.monotonic() - encode_stage_start
 
     # Finish progress line before summary logging
     sys.stdout.write("\n")
@@ -558,6 +600,13 @@ def run(args: argparse.Namespace) -> int:
     con.info("  MP3 bitrate         : %d kbps", cfg.mp3_bitrate)
     con.info("  Conversion time     : %s", _fmt_duration(batch_elapsed))
     con.info("  Total runtime       : %s", _fmt_duration(total_elapsed))
+    con.info(
+        "  Stage timings       : probe=%s, fingerprint=%s, boundaries=%s, encode=%s",
+        _fmt_duration(duration_probe_sec),
+        _fmt_duration(fingerprint_sec),
+        _fmt_duration(boundary_sec),
+        _fmt_duration(encode_sec),
+    )
     con.info("  Throughput          : %.2f files/sec", rate)
     con.info("  Output directory    : %s", output_dir)
     con.info("  Log file            : %s", log_path)

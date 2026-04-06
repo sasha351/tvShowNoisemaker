@@ -241,6 +241,13 @@ def _otsu_threshold(arr: np.ndarray) -> float:
     return best_threshold
 
 
+def _next_power_of_two(n: int) -> int:
+    """Return the smallest power-of-two FFT length >= *n*."""
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
 def _find_alignment_offset(
     ref: np.ndarray,
     other: np.ndarray,
@@ -257,15 +264,16 @@ def _find_alignment_offset(
     if n_ref == 0 or n_other == 0:
         return 0
 
-    n_fft = n_ref + n_other - 1
+    linear_corr_len = n_ref + n_other - 1
+    n_fft = _next_power_of_two(linear_corr_len)
     # Batch FFT across all 12 chroma bands at once
-    fa = np.fft.rfft(ref.astype(np.float64), n=n_fft, axis=1)
-    fb = np.fft.rfft(other.astype(np.float64), n=n_fft, axis=1)
+    fa = np.fft.rfft(ref, n=n_fft, axis=1)
+    fb = np.fft.rfft(other, n=n_fft, axis=1)
     corr = np.fft.irfft(fa * np.conj(fb), n=n_fft, axis=1).sum(axis=0)
 
     # Only consider lags within ±max_lag_frames
     mask = np.full(n_fft, -np.inf)
-    lag_limit = min(max_lag_frames + 1, n_fft)
+    lag_limit = min(max_lag_frames + 1, linear_corr_len)
     indices = np.arange(lag_limit)
     mask[indices] = corr[indices]
     neg_indices = n_fft - indices[1:]  # skip k=0 (n_fft - 0 == n_fft, out of bounds)
@@ -403,9 +411,9 @@ def _match_template_position(
     if T == 0 or N == 0 or T > N:
         return None
 
-    n_fft = N + T - 1
-    fa = np.fft.rfft(episode_fp.astype(np.float64), n=n_fft, axis=1)
-    fb = np.fft.rfft(template.astype(np.float64), n=n_fft, axis=1)
+    n_fft = _next_power_of_two(N + T - 1)
+    fa = np.fft.rfft(episode_fp, n=n_fft, axis=1)
+    fb = np.fft.rfft(template, n=n_fft, axis=1)
     corr = np.fft.irfft(fa * np.conj(fb), n=n_fft, axis=1).sum(axis=0)
 
     valid_len = N - T + 1
@@ -800,13 +808,23 @@ def _detect_by_chromaprint(
     outro_fps: Dict[str, np.ndarray] = {}
     valid_paths: List[str] = []
 
-    # ── Extract fingerprints for every episode ──
-    for fp in filepaths:
+    extraction_jobs: List[Tuple[int, str, float]] = []
+    for idx, fp in enumerate(filepaths):
         dur = durations.get(fp)
         if dur is None:
             logger.warning("Duration unknown for %s; skipping in Chromaprint pass", fp)
             continue
+        extraction_jobs.append((idx, fp, dur))
 
+    if len(extraction_jobs) < 2:
+        logger.warning("Need ≥2 files with known durations; got %d", len(extraction_jobs))
+        stats.valid_files = len(extraction_jobs)
+        stats.elapsed_sec = time.monotonic() - start_time
+        _set_last_fingerprint_stats(stats)
+        return {}
+
+    def _extract_for_file(job: Tuple[int, str, float]) -> Tuple[int, str, Optional[np.ndarray], Optional[np.ndarray], int, int]:
+        idx, fp, dur = job
         intro_len = min(search_window, dur * 0.25, dur)
         intro_fp, intro_cached = _extract_chromaprint(fp, 0.0, intro_len)
 
@@ -814,8 +832,34 @@ def _detect_by_chromaprint(
         outro_len = dur - outro_start
         outro_fp, outro_cached = _extract_chromaprint(fp, outro_start, outro_len)
 
-        stats.cache_hits += int(intro_cached) + int(outro_cached)
-        stats.cache_misses += int(not intro_cached) + int(not outro_cached)
+        hits = int(intro_cached) + int(outro_cached)
+        misses = int(not intro_cached) + int(not outro_cached)
+        return idx, fp, intro_fp, outro_fp, hits, misses
+
+    max_workers = min(len(extraction_jobs), max(1, (os.cpu_count() or 2) // 2))
+    stats.jobs_submitted = len(extraction_jobs)
+    stats.workers = max_workers
+
+    extracted: List[Tuple[int, str, Optional[np.ndarray], Optional[np.ndarray], int, int]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_extract_for_file, job): job[1]
+            for job in extraction_jobs
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            fp = future_map[future]
+            try:
+                extracted.append(future.result())
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Chromaprint worker failed for %s: %s", fp, exc)
+
+    # Rebuild in original file order for deterministic behavior.
+    extracted.sort(key=lambda row: row[0])
+
+    # ── Extract fingerprints for every episode ──
+    for _, fp, intro_fp, outro_fp, hits, misses in extracted:
+        stats.cache_hits += hits
+        stats.cache_misses += misses
 
         if intro_fp is not None and outro_fp is not None:
             intro_fps[fp] = intro_fp
@@ -832,48 +876,94 @@ def _detect_by_chromaprint(
         return {}
 
     stats.valid_files = len(valid_paths)
-    stats.jobs_submitted = len(valid_paths)
-    stats.workers = 1  # pairwise comparison is single-threaded
 
     # ── Intro detection: pairwise comparison ──
     intro_segments: Dict[str, Tuple[float, float]] = {}
 
-    remaining = list(valid_paths)
-    while remaining:
-        current = remaining.pop(0)
-        for other in remaining:
-            lr, rr = _compare_episodes_chromaprint(
-                intro_fps[current], intro_fps[other],
-                min_dur=min_segment, max_dur=max_segment,
-            )
-            if lr is None:
+    def _compare_intro_pair(current: str, other: str) -> Tuple[str, Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        lr, rr = _compare_episodes_chromaprint(
+            intro_fps[current], intro_fps[other],
+            min_dur=min_segment, max_dur=max_segment,
+        )
+        return other, lr, rr
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        remaining = list(valid_paths)
+        while remaining:
+            current = remaining.pop(0)
+            if not remaining:
                 continue
-            # Keep longest per episode.
-            if current not in intro_segments or (lr[1] - lr[0]) > (intro_segments[current][1] - intro_segments[current][0]):
-                intro_segments[current] = lr
-            if other not in intro_segments or (rr[1] - rr[0]) > (intro_segments[other][1] - intro_segments[other][0]):
-                intro_segments[other] = rr
-            break  # first match found for *current*
+
+            future_map = {
+                pool.submit(_compare_intro_pair, current, other): other
+                for other in remaining
+            }
+            pair_results: Dict[str, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
+            for future in concurrent.futures.as_completed(future_map):
+                other = future_map[future]
+                try:
+                    _, lr, rr = future.result()
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.debug("Intro compare failed for %s vs %s: %s", current, other, exc)
+                    continue
+                if lr is None or rr is None:
+                    continue
+                pair_results[other] = (lr, rr)
+
+            for other in remaining:
+                if other not in pair_results:
+                    continue
+                lr, rr = pair_results[other]
+                # Keep longest per episode.
+                if current not in intro_segments or (lr[1] - lr[0]) > (intro_segments[current][1] - intro_segments[current][0]):
+                    intro_segments[current] = lr
+                if other not in intro_segments or (rr[1] - rr[0]) > (intro_segments[other][1] - intro_segments[other][0]):
+                    intro_segments[other] = rr
+                break  # first match found for *current*
 
     # ── Outro detection: pairwise comparison on reversed fingerprints ──
     outro_segments: Dict[str, Tuple[float, float]] = {}
 
-    remaining = list(valid_paths)
-    while remaining:
-        current = remaining.pop(0)
-        for other in remaining:
-            lr, rr = _compare_episodes_chromaprint(
-                outro_fps[current], outro_fps[other],
-                min_dur=min_segment,
-                max_dur=max(max_segment, search_window),
-            )
-            if lr is None:
+    def _compare_outro_pair(current: str, other: str) -> Tuple[str, Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        lr, rr = _compare_episodes_chromaprint(
+            outro_fps[current], outro_fps[other],
+            min_dur=min_segment,
+            max_dur=max(max_segment, search_window),
+        )
+        return other, lr, rr
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        remaining = list(valid_paths)
+        while remaining:
+            current = remaining.pop(0)
+            if not remaining:
                 continue
-            if current not in outro_segments or (lr[1] - lr[0]) > (outro_segments[current][1] - outro_segments[current][0]):
-                outro_segments[current] = lr
-            if other not in outro_segments or (rr[1] - rr[0]) > (outro_segments[other][1] - outro_segments[other][0]):
-                outro_segments[other] = rr
-            break
+
+            future_map = {
+                pool.submit(_compare_outro_pair, current, other): other
+                for other in remaining
+            }
+            pair_results: Dict[str, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
+            for future in concurrent.futures.as_completed(future_map):
+                other = future_map[future]
+                try:
+                    _, lr, rr = future.result()
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.debug("Outro compare failed for %s vs %s: %s", current, other, exc)
+                    continue
+                if lr is None or rr is None:
+                    continue
+                pair_results[other] = (lr, rr)
+
+            for other in remaining:
+                if other not in pair_results:
+                    continue
+                lr, rr = pair_results[other]
+                if current not in outro_segments or (lr[1] - lr[0]) > (outro_segments[current][1] - outro_segments[current][0]):
+                    outro_segments[current] = lr
+                if other not in outro_segments or (rr[1] - rr[0]) > (outro_segments[other][1] - outro_segments[other][0]):
+                    outro_segments[other] = rr
+                break
 
     # ── Assemble per-episode results ──
     results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}

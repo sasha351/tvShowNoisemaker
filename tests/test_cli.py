@@ -1,6 +1,8 @@
 """Tests for tvshow_noisemaker.cli (integration-style, all I/O mocked)."""
 
 import logging
+import threading
+import time
 
 import json
 from pathlib import Path
@@ -365,6 +367,46 @@ def test_run_parallel_multiple_files(tmp_path):
 
     assert exit_code == 0
     assert mock_proc.call_count == 3
+
+
+def test_run_parallelizes_boundary_resolution(tmp_path):
+    """Boundary resolution should run concurrently when workers > 1."""
+    for name in ("ep01.mp4", "ep02.mp4", "ep03.mp4"):
+        (tmp_path / name).touch()
+
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        workers=2,
+    )
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def _slow_resolve(*_args, **_kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return (0.0, 30.0, 2650.0)
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", side_effect=_slow_resolve),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    assert mock_proc.call_count == 3
+    assert max_active > 1
 
 
 def test_run_workers_one_sequential(tmp_path):

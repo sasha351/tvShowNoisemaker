@@ -21,3 +21,9 @@ env/
 .vscode/
 .idea/
 *.swp
+
+# Testing directory
+
+test_media/
+
+improvements.txt
