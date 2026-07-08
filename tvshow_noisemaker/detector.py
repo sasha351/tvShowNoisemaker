@@ -54,6 +54,11 @@ _CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "fingerprints"
 _SILENCE_CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "silence"
 _CHROMAPRINT_CACHE_DIR = Path.home() / ".cache" / "tvshow_noisemaker" / "chromaprint"
 
+# Silence detection scan windows: the intro boundary is only searched in the
+# first 5 minutes and the outro near the end, so decode only those regions.
+_SILENCE_INTRO_WINDOW = 330.0
+_SILENCE_OUTRO_WINDOW = 600.0
+
 # Chromaprint constants (adapted from intro-skipper's detection algorithm).
 # Each Chromaprint point represents ~0.1238 seconds of audio.
 _CHROMAPRINT_SAMPLES_TO_SEC = 0.1238
@@ -1278,6 +1283,7 @@ def detect_by_fingerprinting(
 
 def _silence_cache_path(
     filepath: str, silence_db: float, min_silence_len: float,
+    need_intro: bool = True, need_outro: bool = True,
 ) -> Optional[Path]:
     """Return a stable cache path for silence detection results.
 
@@ -1292,6 +1298,7 @@ def _silence_cache_path(
         return None
     key = "|".join((
         filepath, f"{silence_db:.1f}", f"{min_silence_len:.3f}",
+        f"i{int(need_intro)}o{int(need_outro)}",
         str(size), str(mtime_ns), _CACHE_VERSION,
     ))
     digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()
@@ -1323,81 +1330,136 @@ def _save_cached_silence(
         return
 
 
-def detect_by_silence(
+def _run_silencedetect(
     filepath: str,
-    silence_db: float = -40.0,
-    min_silence_len: float = 0.5,
-    duration: Optional[float] = None,
-) -> Tuple[Optional[float], Optional[float]]:
-    """Detect intro_end and outro_start via ffmpeg ``silencedetect``.
+    silence_db: float,
+    min_silence_len: float,
+    seek: float = 0.0,
+    limit: Optional[float] = None,
+) -> Optional[Tuple[List[float], List[float]]]:
+    """Run ffmpeg ``silencedetect`` over one segment of *filepath*.
 
-    Returns ``(intro_end, outro_start)`` in seconds.  Either value may be
-    ``None`` if the corresponding boundary could not be determined.
+    Returns absolute-time ``(silence_starts, silence_ends)`` lists, or
+    ``None`` if ffmpeg could not be run (so callers can avoid caching a
+    transient failure).  With input seeking (``-ss`` before ``-i``) ffmpeg
+    reports timestamps relative to the seek point, so *seek* is added back.
     """
-    # Check cache first
-    cache_path = _silence_cache_path(filepath, silence_db, min_silence_len)
-    if cache_path is not None:
-        cached = _load_cached_silence(cache_path)
-        if cached is not None:
-            logger.debug("Silence cache hit for %s", filepath)
-            return cached
-
-    cmd = [
-        "ffmpeg",
+    cmd = ["ffmpeg"]
+    if seek > 0:
+        cmd += ["-ss", str(seek)]
+    if limit is not None:
+        cmd += ["-t", str(limit)]
+    cmd += [
         "-i", filepath,
         "-vn",
         "-af", f"silencedetect=noise={silence_db}dB:d={min_silence_len}",
         "-f", "null", "-",
     ]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         stderr = result.stderr
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("silencedetect failed for %s: %s", filepath, exc)
-        return None, None
+        return None
 
-    silence_starts: List[float] = []
-    silence_ends: List[float] = []
-
+    starts: List[float] = []
+    ends: List[float] = []
     for line in stderr.splitlines():
         line = line.strip()
         if "silence_start:" in line:
             try:
-                val = float(line.split("silence_start:")[1].split()[0])
-                silence_starts.append(val)
+                starts.append(seek + float(line.split("silence_start:")[1].split()[0]))
             except (IndexError, ValueError):
                 pass
         elif "silence_end:" in line:
             try:
-                val = float(line.split("silence_end:")[1].split("|")[0].strip())
-                silence_ends.append(val)
+                ends.append(seek + float(line.split("silence_end:")[1].split("|")[0].strip()))
             except (IndexError, ValueError):
                 pass
+    return starts, ends
 
-    # Intro end: look for the first significant silence gap in the first
-    # few minutes.  A gap must end at ≥5 s to be a plausible intro boundary
-    # (otherwise it's just a brief pause at the very start of the file).
-    intro_end: Optional[float] = None
-    for s_start, s_end in zip(silence_starts, silence_ends):
-        if s_start > 300.0:       # stop searching past 5 minutes
-            break
-        if s_end >= 5.0:           # reject trivially short boundaries
-            intro_end = s_end
-            break
 
-    # Outro start: last detected silence start
-    outro_start: Optional[float] = None
-    if silence_starts:
-        candidate = silence_starts[-1]
-        if duration is not None and candidate < duration * 0.5:
-            # The last silence is in the first half – unlikely to be the outro
-            outro_start = None
+def detect_by_silence(
+    filepath: str,
+    silence_db: float = -40.0,
+    min_silence_len: float = 0.5,
+    duration: Optional[float] = None,
+    need_intro: bool = True,
+    need_outro: bool = True,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Detect intro_end and outro_start via ffmpeg ``silencedetect``.
+
+    Only the boundaries requested via *need_intro* / *need_outro* are
+    computed; the other comes back ``None``.  When *duration* is known the
+    scan is limited to the first ``_SILENCE_INTRO_WINDOW`` seconds and the
+    last ``_SILENCE_OUTRO_WINDOW`` seconds instead of decoding the whole
+    file.
+    """
+    if not need_intro and not need_outro:
+        return None, None
+
+    cache_path = _silence_cache_path(
+        filepath, silence_db, min_silence_len, need_intro, need_outro,
+    )
+    if cache_path is not None:
+        cached = _load_cached_silence(cache_path)
+        if cached is not None:
+            logger.debug("Silence cache hit for %s", filepath)
+            return cached
+
+    intro_starts: List[float] = []
+    intro_ends: List[float] = []
+    outro_starts: List[float] = []
+    failed = False
+
+    if duration is None:
+        # Unknown duration: one full-file pass serves both boundaries.
+        full = _run_silencedetect(filepath, silence_db, min_silence_len)
+        if full is None:
+            failed = True
         else:
+            intro_starts, intro_ends = full
+            outro_starts = intro_starts
+    else:
+        if need_intro:
+            head = _run_silencedetect(
+                filepath, silence_db, min_silence_len,
+                limit=_SILENCE_INTRO_WINDOW,
+            )
+            if head is None:
+                failed = True
+            else:
+                intro_starts, intro_ends = head
+        if need_outro:
+            tail = _run_silencedetect(
+                filepath, silence_db, min_silence_len,
+                seek=max(0.0, duration - _SILENCE_OUTRO_WINDOW),
+            )
+            if tail is None:
+                failed = True
+            else:
+                outro_starts = tail[0]
+
+    # Intro end: first significant silence gap in the first few minutes.
+    # A gap must end at ≥5 s to be a plausible intro boundary.
+    intro_end: Optional[float] = None
+    if need_intro:
+        for s_start, s_end in zip(intro_starts, intro_ends):
+            if s_start > 300.0:       # stop searching past 5 minutes
+                break
+            if s_end >= 5.0:           # reject trivially short boundaries
+                intro_end = s_end
+                break
+
+    # Outro start: last detected silence start, rejected if in the first half.
+    outro_start: Optional[float] = None
+    if need_outro and outro_starts:
+        candidate = outro_starts[-1]
+        if duration is None or candidate >= duration * 0.5:
             outro_start = candidate
 
-    _save_cached_silence(cache_path, intro_end, outro_start) if cache_path is not None else None
+    if cache_path is not None and not failed:
+        _save_cached_silence(cache_path, intro_end, outro_start)
     return intro_end, outro_start
 
 
@@ -1439,16 +1501,21 @@ def resolve_boundaries(
     if filepath in fingerprint_results:
         fp_intro_start, fp_intro_end, fp_outro = fingerprint_results[filepath]
 
-    # 3. Silence detection (fall back when fingerprinting didn't run / failed)
+    # 3. Silence detection — only for boundaries that config timestamps and
+    #    fingerprinting both failed to provide.
     sil_intro: Optional[float] = None
     sil_outro: Optional[float] = None
-    if fp_intro_end is None or fp_outro is None:
+    need_sil_intro = ts_intro_end is None and fp_intro_end is None
+    need_sil_outro = ts_outro is None and fp_outro is None
+    if need_sil_intro or need_sil_outro:
         logger.debug("Running silence detection for %s", basename)
         sil_intro, sil_outro = detect_by_silence(
             filepath,
             silence_db=cfg.silence_db,
             min_silence_len=cfg.min_silence_len,
             duration=duration,
+            need_intro=need_sil_intro,
+            need_outro=need_sil_outro,
         )
 
     # Merge: prefer fingerprinting over silence; prefer both over user durations.

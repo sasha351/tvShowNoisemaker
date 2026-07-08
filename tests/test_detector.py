@@ -306,18 +306,34 @@ _SILENCE_STDERR = """\
 """
 
 
+def _fake_silencedetect_run(head_stderr: str, tail_stderr: str):
+    """Return a subprocess.run side_effect that distinguishes head vs tail pass."""
+    def _side_effect(cmd, **kwargs):
+        stderr = tail_stderr if "-ss" in cmd else head_stderr
+        return MagicMock(returncode=0, stdout="", stderr=stderr)
+    return _side_effect
+
+
 def test_detect_by_silence_parses_output():
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="",
-            stderr=_SILENCE_STDERR,
-        )
+    # duration=2700 → tail pass seeks to 2100; silence at absolute 2550 is
+    # reported by ffmpeg as relative 450.
+    tail = (
+        "[silencedetect] silence_start: 450.0\n"
+        "[silencedetect] silence_end: 500.0 | silence_duration: 50.0\n"
+    )
+    with patch(
+        "subprocess.run",
+        side_effect=_fake_silencedetect_run(_SILENCE_STDERR, tail),
+    ) as mock_run:
         intro_end, outro_start = detect_by_silence(
             "/fake/ep01.mp4", duration=2700.0
         )
     assert intro_end == pytest.approx(28.5)
     assert outro_start == pytest.approx(2550.0)
+    assert mock_run.call_count == 2  # two windowed passes, not one full scan
+    head_cmd, tail_cmd = (c.args[0] for c in mock_run.call_args_list)
+    assert "-t" in head_cmd and "-ss" not in head_cmd
+    assert "-ss" in tail_cmd
 
 
 def test_detect_by_silence_no_silence():
@@ -338,16 +354,17 @@ def test_detect_by_silence_exception():
 
 
 def test_detect_by_silence_outro_in_first_half_ignored():
-    """If the last silence is in the first 50% of the file it should be ignored."""
-    stderr = (
-        "[silencedetect] silence_start: 0\n"
-        "[silencedetect] silence_end: 10.0 | silence_duration: 10.0\n"
-        "[silencedetect] silence_start: 100.0\n"  # < 50% of 2700
-        "[silencedetect] silence_end: 101.0 | silence_duration: 1.0\n"
+    """A tail-pass silence that is still in the first 50% of the file is rejected."""
+    # duration=1000 → tail seek = 400; relative 50 → absolute 450 < 500 (50%).
+    tail = (
+        "[silencedetect] silence_start: 50.0\n"
+        "[silencedetect] silence_end: 51.0 | silence_duration: 1.0\n"
     )
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr=stderr)
-        _, outro_start = detect_by_silence("/fake/ep01.mp4", duration=2700.0)
+    with patch(
+        "subprocess.run",
+        side_effect=_fake_silencedetect_run("no silence", tail),
+    ):
+        _, outro_start = detect_by_silence("/fake/ep01.mp4", duration=1000.0)
     assert outro_start is None
 
 
@@ -356,16 +373,19 @@ def test_detect_by_silence_caches_results(tmp_path):
     fake_file = tmp_path / "ep01.mp4"
     fake_file.write_bytes(b"\x00" * 100)
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="", stderr=_SILENCE_STDERR,
-        )
+    tail = (
+        "[silencedetect] silence_start: 450.0\n"
+        "[silencedetect] silence_end: 500.0 | silence_duration: 50.0\n"
+    )
+    with patch(
+        "subprocess.run",
+        side_effect=_fake_silencedetect_run(_SILENCE_STDERR, tail),
+    ) as mock_run:
         r1 = detect_by_silence(str(fake_file), duration=2700.0)
 
-    assert mock_run.call_count == 1
+    assert mock_run.call_count == 2  # head + tail pass
     assert r1 == (pytest.approx(28.5), pytest.approx(2550.0))
 
-    # Second call should hit cache, not call subprocess
     with patch("subprocess.run") as mock_run2:
         r2 = detect_by_silence(str(fake_file), duration=2700.0)
 
@@ -383,6 +403,50 @@ def test_detect_by_silence_skips_video_decode():
     assert mock_run.call_args_list, "expected at least one ffmpeg call"
     for c in mock_run.call_args_list:
         assert "-vn" in c.args[0], f"missing -vn in: {c.args[0]}"
+
+
+def test_detect_by_silence_only_outro_skips_head_pass():
+    tail = (
+        "[silencedetect] silence_start: 450.0\n"
+        "[silencedetect] silence_end: 500.0 | silence_duration: 50.0\n"
+    )
+    with patch(
+        "subprocess.run",
+        side_effect=_fake_silencedetect_run("unused", tail),
+    ) as mock_run:
+        intro_end, outro_start = detect_by_silence(
+            "/fake/ep01.mp4", duration=2700.0, need_intro=False,
+        )
+    assert intro_end is None
+    assert outro_start == pytest.approx(2550.0)
+    assert mock_run.call_count == 1
+    assert "-ss" in mock_run.call_args.args[0]
+
+
+def test_detect_by_silence_nothing_needed_no_subprocess():
+    with patch("subprocess.run") as mock_run:
+        result = detect_by_silence(
+            "/fake/ep01.mp4", duration=2700.0,
+            need_intro=False, need_outro=False,
+        )
+    mock_run.assert_not_called()
+    assert result == (None, None)
+
+
+def test_resolve_boundaries_partial_fingerprint_limits_silence():
+    """Fingerprint found the intro → silence detection only asked for the outro."""
+    cfg = _make_cfg()
+    fp_results = {"/show/ep01.mp4": (0.0, 30.0, None)}
+    with patch("tvshow_noisemaker.detector.detect_by_silence") as mock_sil:
+        mock_sil.return_value = (None, 2580.0)
+        intro_start, intro_end, outro_start = resolve_boundaries(
+            "/show/ep01.mp4", cfg=cfg, fingerprint_results=fp_results, duration=2700.0
+        )
+    kwargs = mock_sil.call_args.kwargs
+    assert kwargs["need_intro"] is False
+    assert kwargs["need_outro"] is True
+    assert intro_end == pytest.approx(30.0)
+    assert outro_start == pytest.approx(2580.0)
 
 
 # ---------------------------------------------------------------------------
