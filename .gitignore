@@ -27,3 +27,6 @@ env/
 test_media/
 
 improvements.txt
+
+# macOS
+.DS_Store
