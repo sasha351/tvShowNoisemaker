@@ -373,6 +373,18 @@ def test_detect_by_silence_caches_results(tmp_path):
     assert r2 == r1
 
 
+def test_detect_by_silence_skips_video_decode():
+    """Every silencedetect ffmpeg invocation must pass -vn (audio-only decode)."""
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="", stderr=_SILENCE_STDERR,
+        )
+        detect_by_silence("/fake/ep01.mp4", duration=2700.0)
+    assert mock_run.call_args_list, "expected at least one ffmpeg call"
+    for c in mock_run.call_args_list:
+        assert "-vn" in c.args[0], f"missing -vn in: {c.args[0]}"
+
+
 # ---------------------------------------------------------------------------
 # resolve_boundaries
 # ---------------------------------------------------------------------------

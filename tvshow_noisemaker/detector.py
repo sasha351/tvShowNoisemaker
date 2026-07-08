@@ -1345,6 +1345,7 @@ def detect_by_silence(
     cmd = [
         "ffmpeg",
         "-i", filepath,
+        "-vn",
         "-af", f"silencedetect=noise={silence_db}dB:d={min_silence_len}",
         "-f", "null", "-",
     ]
