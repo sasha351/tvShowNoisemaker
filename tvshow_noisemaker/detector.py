@@ -783,6 +783,44 @@ def _compare_episodes_chromaprint(
     return best_lhs, best_rhs
 
 
+def _pairwise_best_segments(
+    fps: Dict[str, np.ndarray],
+    paths: List[str],
+    min_dur: float,
+    max_dur: float,
+    max_workers: int,
+) -> Dict[str, Tuple[float, float]]:
+    """Compare every episode pair; keep the longest matching segment per episode.
+
+    All pair comparisons were already being computed by the previous
+    first-match strategy — this keeps the same work but uses every result.
+    Deterministic: pairs are processed in submission order and ties keep
+    the earlier pair's segment.
+    """
+    pairs = [(a, b) for i, a in enumerate(paths) for b in paths[i + 1:]]
+
+    def _compare(pair: Tuple[str, str]):
+        a, b = pair
+        try:
+            return pair, _compare_episodes_chromaprint(
+                fps[a], fps[b], min_dur=min_dur, max_dur=max_dur,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Chromaprint compare failed for %s vs %s: %s", a, b, exc)
+            return pair, (None, None)
+
+    segments: Dict[str, Tuple[float, float]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for (a, b), (lr, rr) in pool.map(_compare, pairs):
+            if lr is None or rr is None:
+                continue
+            if a not in segments or (lr[1] - lr[0]) > (segments[a][1] - segments[a][0]):
+                segments[a] = lr
+            if b not in segments or (rr[1] - rr[0]) > (segments[b][1] - segments[b][0]):
+                segments[b] = rr
+    return segments
+
+
 # ── Chromaprint orchestrator ────────────────────────────────────────────────
 
 
@@ -881,93 +919,13 @@ def _detect_by_chromaprint(
 
     stats.valid_files = len(valid_paths)
 
-    # ── Intro detection: pairwise comparison ──
-    intro_segments: Dict[str, Tuple[float, float]] = {}
-
-    def _compare_intro_pair(current: str, other: str) -> Tuple[str, Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
-        lr, rr = _compare_episodes_chromaprint(
-            intro_fps[current], intro_fps[other],
-            min_dur=min_segment, max_dur=max_segment,
-        )
-        return other, lr, rr
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        remaining = list(valid_paths)
-        while remaining:
-            current = remaining.pop(0)
-            if not remaining:
-                continue
-
-            future_map = {
-                pool.submit(_compare_intro_pair, current, other): other
-                for other in remaining
-            }
-            pair_results: Dict[str, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
-            for future in concurrent.futures.as_completed(future_map):
-                other = future_map[future]
-                try:
-                    _, lr, rr = future.result()
-                except Exception as exc:  # pylint: disable=broad-except
-                    logger.debug("Intro compare failed for %s vs %s: %s", current, other, exc)
-                    continue
-                if lr is None or rr is None:
-                    continue
-                pair_results[other] = (lr, rr)
-
-            for other in remaining:
-                if other not in pair_results:
-                    continue
-                lr, rr = pair_results[other]
-                # Keep longest per episode.
-                if current not in intro_segments or (lr[1] - lr[0]) > (intro_segments[current][1] - intro_segments[current][0]):
-                    intro_segments[current] = lr
-                if other not in intro_segments or (rr[1] - rr[0]) > (intro_segments[other][1] - intro_segments[other][0]):
-                    intro_segments[other] = rr
-                break  # first match found for *current*
-
-    # ── Outro detection: pairwise comparison on reversed fingerprints ──
-    outro_segments: Dict[str, Tuple[float, float]] = {}
-
-    def _compare_outro_pair(current: str, other: str) -> Tuple[str, Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
-        lr, rr = _compare_episodes_chromaprint(
-            outro_fps[current], outro_fps[other],
-            min_dur=min_segment,
-            max_dur=max(max_segment, search_window),
-        )
-        return other, lr, rr
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        remaining = list(valid_paths)
-        while remaining:
-            current = remaining.pop(0)
-            if not remaining:
-                continue
-
-            future_map = {
-                pool.submit(_compare_outro_pair, current, other): other
-                for other in remaining
-            }
-            pair_results: Dict[str, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
-            for future in concurrent.futures.as_completed(future_map):
-                other = future_map[future]
-                try:
-                    _, lr, rr = future.result()
-                except Exception as exc:  # pylint: disable=broad-except
-                    logger.debug("Outro compare failed for %s vs %s: %s", current, other, exc)
-                    continue
-                if lr is None or rr is None:
-                    continue
-                pair_results[other] = (lr, rr)
-
-            for other in remaining:
-                if other not in pair_results:
-                    continue
-                lr, rr = pair_results[other]
-                if current not in outro_segments or (lr[1] - lr[0]) > (outro_segments[current][1] - outro_segments[current][0]):
-                    outro_segments[current] = lr
-                if other not in outro_segments or (rr[1] - rr[0]) > (outro_segments[other][1] - outro_segments[other][0]):
-                    outro_segments[other] = rr
-                break
+    # ── Intro/outro detection: pairwise comparison, longest match wins ──
+    intro_segments = _pairwise_best_segments(
+        intro_fps, valid_paths, min_segment, max_segment, max_workers,
+    )
+    outro_segments = _pairwise_best_segments(
+        outro_fps, valid_paths, min_segment, max(max_segment, search_window), max_workers,
+    )
 
     # ── Assemble per-episode results ──
     results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}

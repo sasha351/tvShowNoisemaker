@@ -19,6 +19,7 @@ from tvshow_noisemaker.detector import (
     _find_contiguous_range,
     _match_template_position,
     _otsu_threshold,
+    _pairwise_best_segments,
     _popcount32,
     _frame_similarity,
     _smooth,
@@ -667,6 +668,34 @@ def test_compare_episodes_chromaprint_too_short():
     fp_b = np.concatenate([intro, filler_b])
     lr, rr = _compare_episodes_chromaprint(fp_a, fp_b, min_dur=15.0, max_dur=120.0)
     assert lr is None and rr is None
+
+
+def test_pairwise_best_segments_keeps_longest():
+    """Each episode keeps the longest segment found across all its pairs."""
+    fps = {
+        "a": np.array([1], dtype=np.uint32),
+        "b": np.array([2], dtype=np.uint32),
+        "c": np.array([3], dtype=np.uint32),
+    }
+    names = {1: "a", 2: "b", 3: "c"}
+    table = {
+        ("a", "b"): ((0.0, 20.0), (0.0, 20.0)),
+        ("a", "c"): ((0.0, 30.0), (0.0, 30.0)),
+        ("b", "c"): ((0.0, 25.0), (5.0, 28.0)),
+    }
+
+    def _fake(lhs, rhs, min_dur, max_dur):
+        return table[(names[int(lhs[0])], names[int(rhs[0])])]
+
+    with patch(
+        "tvshow_noisemaker.detector._compare_episodes_chromaprint",
+        side_effect=_fake,
+    ):
+        segs = _pairwise_best_segments(fps, ["a", "b", "c"], 15.0, 120.0, max_workers=2)
+
+    assert segs["a"] == (0.0, 30.0)   # longest of 20s (vs b) and 30s (vs c)
+    assert segs["b"] == (0.0, 25.0)   # longest of 20s (vs a) and 25s (vs c)
+    assert segs["c"] == (0.0, 30.0)   # longest of 30s (vs a) and 23s (vs b)
 
 
 def test_find_contiguous_at_shift_matching():
