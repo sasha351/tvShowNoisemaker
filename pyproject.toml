@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 tvshow-noisemaker = "tvshow_noisemaker.cli:main"
+tvshow-noisemaker-gui = "tvshow_noisemaker.gui:main"
 
 [project.optional-dependencies]
 stft = [
