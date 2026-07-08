@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from tvshow_noisemaker.cli import run, _build_parser, _setup_logging
+from tvshow_noisemaker.cli import run, _build_parser, _setup_logging, _default_encode_workers
 
 
 # ---------------------------------------------------------------------------
@@ -467,3 +467,13 @@ def test_run_parallel_one_failure_does_not_crash_batch(tmp_path):
     assert exit_code != 0
     # But both files should have been attempted
     assert mock_proc.call_count == 2
+
+
+def test_default_encode_workers_uses_all_cores():
+    with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=8):
+        assert _default_encode_workers() == 8
+
+
+def test_default_encode_workers_unknown_cpu_count():
+    with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=None):
+        assert _default_encode_workers() == 2

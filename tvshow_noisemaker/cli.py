@@ -506,7 +506,7 @@ def run(args: argparse.Namespace) -> int:
         jobs.append((filepath, basename, intro_start, intro_end, outro_start, content_duration, trimmed))
 
     # ── Phase 2: process files in parallel ──────────────────────────────────
-    max_workers = cfg.workers or max(1, (os.cpu_count() or 2) // 2)
+    max_workers = cfg.workers or _default_encode_workers()
     max_workers = min(max_workers, len(jobs)) if jobs else 1
     progress_lock = threading.Lock()
     done_count = len(skipped)  # skipped files count as "done" for progress
@@ -691,6 +691,15 @@ def _file_size(path: str) -> int:
         return os.path.getsize(path)
     except OSError:
         return 0
+
+
+def _default_encode_workers() -> int:
+    """Default worker count for the encode stage.
+
+    libmp3lame is effectively single-threaded per ffmpeg process, so
+    audio-only encodes scale close to linearly up to the core count.
+    """
+    return max(1, os.cpu_count() or 2)
 
 
 def main() -> None:
