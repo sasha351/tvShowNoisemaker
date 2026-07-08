@@ -83,10 +83,10 @@ def _setup_logging(
     # Remove any pre-existing handlers (e.g. from repeated test runs)
     root.handlers.clear()
 
-    # File handler – DEBUG only when verbose, otherwise INFO
+    # File handler always captures full DEBUG detail for troubleshooting.
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG if verbose else logging.INFO)
+    fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     root.addHandler(fh)
 

@@ -339,6 +339,22 @@ def test_setup_logging_default_console_level_info(tmp_path):
     assert any(h.level == logging.INFO for h in stream_handlers)
 
 
+def test_setup_logging_file_handler_always_debug(tmp_path):
+    """The log file must capture DEBUG even without --verbose."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _setup_logging(
+        input_dir=str(tmp_path),
+        output_dir=str(output_dir),
+        log_file=None,
+        verbose=False,
+    )
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+    assert file_handlers, "Expected a FileHandler on the root logger"
+    assert all(h.level == logging.DEBUG for h in file_handlers)
+
+
 # ---------------------------------------------------------------------------
 # run() – parallel processing
 # ---------------------------------------------------------------------------
