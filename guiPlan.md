@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - No new third-party dependencies — stdlib only (tkinter ships with python.org and Homebrew Python on macOS).
-- The existing CLI (`tvshow_noisemaker/cli.py`) must not be modified.
+- The existing CLI (`tvshow_noisemaker/cli.py`) must not be modified **by the GUI work**. (Other planned work — improvements.md T2/T5/T7 — edits cli.py; that's fine. Those tasks preserve the console log wording this GUI parses: `Starting conversion  (N files`, `✓ Done`, `✗ Skipped`.)
 - Python ≥3.9 (matches `pyproject.toml` `requires-python`).
 - Single new source file for the GUI; one entry point `tvshow-noisemaker-gui` added to `[project.scripts]`.
 - Function over looks: default ttk widgets, no theming, no icons.
@@ -27,7 +27,7 @@ A single small window (~700×500) with:
 1. **Source row** — read-only text field + `Browse…` button (`tkinter.filedialog.askdirectory`). This is the folder of video episodes (`--input-dir`).
 2. **Destination row** — same pattern, for the MP3 output folder (`--output-dir`).
 3. **Start button** — disabled until both folders are chosen; becomes `Cancel` while a run is active.
-4. **Progress bar** — `ttk.Progressbar`. Indeterminate (bouncing) during the detection/fingerprint phase; switches to determinate once the CLI prints its `Starting conversion  (N files, …)` line, then advances as each `✓ Done` / `✗ Skipped` line appears.
+4. **Progress bar** — `ttk.Progressbar`. Indeterminate (bouncing) during the detection/fingerprint phase; switches to determinate once the CLI prints its `Starting conversion  (N files, …)` line, then advances as each `✓ Done` / `✗ Skipped` / `✗ Failed` line appears. Note: the CLI emits `✗ Skipped` lines *before* `Starting conversion` (boundary-resolution phase), so file-result lines must be counted even while the total is still unknown.
 5. **Status line** — one label, e.g. `Fingerprinting…`, `Converting 3/12…`, `Done: 11 converted, 1 skipped`, or `Failed — see log`.
 6. **Log pane** — read-only scrolling `tkinter.Text` showing the CLI's own output verbatim. This *is* the detail view; no custom formatting.
 
@@ -37,8 +37,9 @@ A single small window (~700×500) with:
 - A daemon thread reads the pipe line-by-line and puts lines on a `queue.Queue`. A sentinel (`None`) is queued when the process exits, along with the return code.
 - The Tk thread polls the queue via `root.after(100, poll)` — no cross-thread widget access ever, which is the classic tkinter crash source. This is the "bulletproof" part.
 - Progress parsing (regex on lines the CLI already emits):
-  - `Starting conversion  (N files` → total known, switch bar to determinate, max = N.
-  - lines containing `✓ Done` or `✗ Skipped` → increment completed count.
+  - `Starting conversion  (N files` → total known, switch bar to determinate, max = N, value = results counted so far (skips can precede this line).
+  - lines containing `✓ Done`, `✗ Skipped`, or `✗ Failed` → increment completed count (the CLI itself counts all three toward `done`).
+  - the CLI's own `\r`-drawn `Progress [###…]` line arrives as extra "lines" in the pipe (universal newlines treats `\r` as a terminator); it matches neither pattern and is just extra noise in the log pane — leave it alone.
 - Cancel calls `process.terminate()`; the reader thread's sentinel unwinds the UI back to idle.
 - Exit code 0 → status shows the summary; nonzero → status shows failure, log pane has the reason.
 
@@ -81,7 +82,7 @@ The only non-trivial logic, so it's the only unit-tested piece. Pure functions, 
 
 **Interfaces:**
 - Produces: `parse_total(line: str) -> Optional[int]` — returns N from a `Starting conversion  (N files, …)` line, else None.
-- Produces: `is_file_result(line: str) -> bool` — True if the line marks one file finished (`✓ Done` or `✗ Skipped`).
+- Produces: `is_file_result(line: str) -> bool` — True if the line marks one file finished (`✓ Done`, `✗ Skipped`, or `✗ Failed`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -100,10 +101,13 @@ def test_parse_total_ignores_other_lines():
     assert parse_total("") is None
 
 
-def test_is_file_result_done_and_skipped():
+def test_is_file_result_done_skipped_failed():
     assert is_file_result("  ✓ Done in 3.2s → /tmp/out/ep01.mp3 (4.1 MB)")
     assert is_file_result("  ✗ Skipped – no boundaries resolved")
+    assert is_file_result("  ✗ Failed – ep02.mkv: ffmpeg exited 1")
     assert not is_file_result("Processing episode01.mkv")
+    # Summary-section listings use '•', not '✗' — they must not double-count.
+    assert not is_file_result("  • ep03.mkv – no boundaries resolved")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -131,8 +135,8 @@ def parse_total(line: str) -> Optional[int]:
 
 
 def is_file_result(line: str) -> bool:
-    """True if the line marks one file as finished (converted or skipped)."""
-    return "✓ Done" in line or "✗ Skipped" in line
+    """True if the line marks one file as finished (converted, skipped, or failed)."""
+    return "✓ Done" in line or "✗ Skipped" in line or "✗ Failed" in line
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -279,14 +283,16 @@ class App:
         self._log_append(line)
         total = parse_total(line)
         if total is not None:
+            # ✗ Skipped lines can arrive before this one — carry them over.
             self.total = total
             self.bar.stop()
-            self.bar.config(mode="determinate", maximum=total, value=0)
-            self.status.config(text=f"Converting 0/{total}…")
-        elif self.total and is_file_result(line):
+            self.bar.config(mode="determinate", maximum=total, value=self.done)
+            self.status.config(text=f"Converting {self.done}/{total}…")
+        elif is_file_result(line):
             self.done += 1
-            self.bar.config(value=self.done)
-            self.status.config(text=f"Converting {self.done}/{self.total}…")
+            if self.total:
+                self.bar.config(value=self.done)
+                self.status.config(text=f"Converting {self.done}/{self.total}…")
 
     def _finish(self) -> None:
         code = self.proc.returncode if self.proc else -1
@@ -350,7 +356,7 @@ git commit -m "feat: add bare-bones tkinter GUI"
 ### Task 3: Entry point
 
 **Files:**
-- Modify: `pyproject.toml` (the `[project.scripts]` table)
+- Modify: `pyproject.toml` (the `[project.scripts]` table only — improvements.md T9 edits `[project.optional-dependencies]` in the same file; don't run these two in parallel worktrees, sequence them to avoid a textual merge conflict)
 
 **Interfaces:**
 - Consumes: `main()` from Task 2.

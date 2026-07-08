@@ -111,7 +111,7 @@ def test_build_config_defaults():
         log_file=None,
     )
     cfg = build_config(args, {})
-    assert cfg.mp3_bitrate == 192
+    assert cfg.mp3_bitrate == 256
     assert cfg.silence_db == -40.0
     assert cfg.min_silence_len == 0.5
     assert cfg.fingerprint_search_window == 300.0

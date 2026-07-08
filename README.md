@@ -28,11 +28,11 @@ Create a reliable launcher (recommended):
 
 ```bash
 mkdir -p "$HOME/bin"
-cat > "$HOME/bin/tvshow-noisemaker" <<'EOF'
+SRC="/path/to/tvShowNoisemaker"   # replace with your clone location
+cat > "$HOME/bin/tvshow-noisemaker" <<EOF
 #!/bin/zsh
-VENV="$HOME/Documents/iPod Project/tvShowNoisemaker/.venv"
-SRC="$HOME/Documents/iPod Project/tvShowNoisemaker"
-PYTHONPATH="$SRC" exec "$VENV/bin/python3" -m tvshow_noisemaker.cli "$@"
+VENV="$SRC/.venv"
+PYTHONPATH="$SRC" exec "\$VENV/bin/python3" -m tvshow_noisemaker.cli "\$@"
 EOF
 chmod +x "$HOME/bin/tvshow-noisemaker"
 ```
@@ -59,8 +59,8 @@ Run a full command with both input and output directories:
 
 ```bash
 tvshow-noisemaker \
-    -i "$HOME/Media/TV Shows/Family Guy/Season 19" \
-    -o "$HOME/Media/TV Show Clips/Family Guy/Season 19"
+    -i "$HOME/Media/TV Shows/Show Name/Season 01" \
+    -o "$HOME/Media/TV Show Clips/Show Name/Season 01"
 ```
 
 If writing to an external volume, ensure the base output directory already exists before running:
@@ -68,18 +68,18 @@ If writing to an external volume, ensure the base output directory already exist
 ```bash
 mkdir -p "/Volumes/MY DRIVE/Media/TV Show Clips"
 tvshow-noisemaker \
-    -i "$HOME/Media/TV Shows/Family Guy/Season 19" \
-    -o "/Volumes/MY DRIVE/Media/TV Show Clips/Family Guy/Season 19"
+    -i "$HOME/Media/TV Shows/Show Name/Season 01" \
+    -o "/Volumes/MY DRIVE/Media/TV Show Clips/Show Name/Season 01"
 ```
 
 Paths containing apostrophes must be quoted carefully:
 
 ```bash
 # Correct - double quotes around path containing apostrophe
--o "/Volumes/SASHA'S IPO/Media/TV Show Clips/Family Guy/Season 19"
+-o "/Volumes/MY DRIVE'S VOLUME/Media/TV Show Clips/Show Name/Season 01"
 
 # Wrong - apostrophe breaks shell parsing
--o /Volumes/SASHA\'S\ IPO/Media/...
+-o /Volumes/MY\ DRIVE\'S\ VOLUME/Media/...
 ```
 
 Common variants:
@@ -95,6 +95,28 @@ tvshow-noisemaker -i ./eps -o ./out --intro-duration 90 --outro-duration 30
 tvshow-noisemaker -i ./eps -o ./out --mp3-bitrate 320 --workers 8 --benchmark-fingerprint
 ```
 
+## GUI
+
+For a no-terminal workflow, launch the bundled desktop GUI instead:
+
+```bash
+tvshow-noisemaker-gui
+```
+
+Add one or more source folders (videos) and pick a destination folder (MP3s), then click Start. Each source folder is processed in turn, writing its MP3s into a subfolder of the destination named after that source folder (to avoid collisions between shows). The GUI runs the same CLI underneath and streams its log output live, with a progress bar and status line showing which folder is currently processing. Click Cancel to stop the whole batch early. There are no options beyond source/destination — for bitrate, workers, fingerprinting, or config-file control, use the CLI directly.
+
+Built entirely on tkinter (Python stdlib) — no extra install required.
+
+### Desktop App Shortcut
+
+For a double-clickable launcher (no terminal at all), run once:
+
+```bash
+./build_app.sh
+```
+
+This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight/Launchpad. Drag it to the Dock for a permanent icon. Rerun the script any time (e.g. after moving the repo) to rebuild it.
+
 ## CLI Flags (Most Used)
 
 | Flag | Default | Purpose |
@@ -103,7 +125,7 @@ tvshow-noisemaker -i ./eps -o ./out --mp3-bitrate 320 --workers 8 --benchmark-fi
 | `--output-dir`, `-o` | required | Output MP3 directory |
 | `--config`, `-c` | none | JSON config file |
 | `--workers`, `-w` | half CPU count | Parallel encode workers |
-| `--mp3-bitrate` | 192 | MP3 bitrate (kbps) |
+| `--mp3-bitrate` | 256 | MP3 bitrate (kbps) |
 | `--fingerprint` / `--no-fingerprint` | on | Enable/disable fingerprinting |
 | `--fingerprint-search-window` | 300 | Search window from start/end |
 | `--silence-db` | -40 | Silence threshold (dBFS) |
@@ -118,7 +140,7 @@ Example:
 
 ```json
 {
-    "mp3_bitrate": 192,
+    "mp3_bitrate": 256,
     "intro_duration": 90.0,
     "outro_duration": 30.0,
     "silence_db": -40.0,
@@ -174,4 +196,4 @@ The tool creates the output path with `mkdir(parents=True)`, but macOS volume pe
 
 ### Paths with apostrophes or special characters fail
 
-Wrap the full path in double quotes when it contains apostrophes or spaces (for example, `"/Volumes/SASHA'S IPO/..."`). Unquoted paths can break shell parsing.
+Wrap the full path in double quotes when it contains apostrophes or spaces (for example, `"/Volumes/MY DRIVE'S VOLUME/..."`). Unquoted paths can break shell parsing.

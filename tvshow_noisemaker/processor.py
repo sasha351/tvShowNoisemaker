@@ -26,7 +26,7 @@ def process_file(
     intro_end: float,
     outro_start: float,
     intro_start: float = 0.0,
-    mp3_bitrate: int = 192,
+    mp3_bitrate: int = 256,
     metadata: Optional[dict[str, str]] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
@@ -46,7 +46,7 @@ def process_file(
         this (the cold open) is preserved.  When 0 the behaviour is
         the same as a simple seek to *intro_end*.
     mp3_bitrate:
-        MP3 encoding bitrate in kbps (e.g. 192).
+        MP3 encoding bitrate in kbps (e.g. 256).
     metadata:
         Optional output tags to write into the MP3 with ffmpeg.
 

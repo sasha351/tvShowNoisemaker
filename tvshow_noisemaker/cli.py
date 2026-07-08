@@ -153,7 +153,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="KBPS",
-        help="MP3 encoding bitrate in kbps (default: 192).",
+        help="MP3 encoding bitrate in kbps (default: 256).",
     )
 
     # Config file

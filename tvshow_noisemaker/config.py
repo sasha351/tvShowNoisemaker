@@ -8,7 +8,7 @@ Supports a JSON config file with the following optional keys:
         "timestamps": {
             "episode_s01e01.mp4": {"intro_end": 30.0, "outro_start": 2580.0}
         },
-        "mp3_bitrate": 192,
+        "mp3_bitrate": 256,
         "silence_db": -40.0,
         "min_silence_len": 0.5,
         "fingerprint_search_window": 300.0
@@ -47,7 +47,7 @@ class Config:
     outro_duration: Optional[float] = None
     # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
     timestamps: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    mp3_bitrate: int = 192
+    mp3_bitrate: int = 256
     silence_db: float = -40.0
     min_silence_len: float = 0.5
     fingerprint_search_window: float = 300.0
@@ -143,7 +143,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
 
     intro_duration = _pick(getattr(args, "intro_duration", None), "intro_duration", None)
     outro_duration = _pick(getattr(args, "outro_duration", None), "outro_duration", None)
-    mp3_bitrate = _pick(getattr(args, "mp3_bitrate", None), "mp3_bitrate", 192)
+    mp3_bitrate = _pick(getattr(args, "mp3_bitrate", None), "mp3_bitrate", 256)
     silence_db = _pick(getattr(args, "silence_db", None), "silence_db", -40.0)
     min_silence_len = _pick(getattr(args, "min_silence_len", None), "min_silence_len", 0.5)
     fingerprint_search_window = _pick(
