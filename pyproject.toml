@@ -9,7 +9,6 @@ description = "CLI tool: trim intro/outro from TV show video episodes and export
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "librosa>=0.10.0",
     "numpy>=1.24.0",
     "static-ffmpeg>=3.0",
 ]
@@ -18,6 +17,9 @@ dependencies = [
 tvshow-noisemaker = "tvshow_noisemaker.cli:main"
 
 [project.optional-dependencies]
+stft = [
+    "librosa>=0.10.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-mock>=3.10",

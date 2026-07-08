@@ -168,8 +168,10 @@ def _chroma_fingerprint(audio: np.ndarray, sr: int) -> np.ndarray:
     """Compute a chroma STFT fingerprint matrix (12 × n_frames)."""
     if _librosa is None:
         raise RuntimeError(
-            "librosa is required for audio fingerprinting but is not installed. "
-            "Run `pip install librosa` or use --no-fingerprint to disable fingerprinting."
+            "librosa is required for chroma STFT fingerprinting but is not installed. "
+            "Install fpcalc (`brew install chromaprint`) for the primary detection path, "
+            "run `pip install 'tvshow-noisemaker[stft]'` for this fallback, "
+            "or use --no-fingerprint to disable fingerprinting."
         )
 
     if audio.size == 0:
@@ -1047,8 +1049,10 @@ def detect_by_fingerprinting(
         stats.elapsed_sec = time.monotonic() - start_time
         _set_last_fingerprint_stats(stats)
         raise RuntimeError(
-            "librosa is required for audio fingerprinting but is not installed. "
-            "Run `pip install librosa` or use --no-fingerprint to disable."
+            "librosa is required for chroma STFT fingerprinting but is not installed. "
+            "Install fpcalc (`brew install chromaprint`) for the primary detection path, "
+            "run `pip install 'tvshow-noisemaker[stft]'` for this fallback, "
+            "or use --no-fingerprint to disable."
         )
 
     if len(filepaths) < 2:

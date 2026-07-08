@@ -47,7 +47,7 @@ If conda is installed, the pip-generated entry point (`.venv/bin/tvshow-noisemak
 - Detects intro/outro boundaries using this priority:
     1. Per-file timestamps from config
     2. Chromaprint fingerprinting (`fpcalc`)
-    3. Chroma fallback (`librosa`) when Chromaprint is unavailable
+    3. Chroma fallback (`librosa`, install with `pip install 'tvshow-noisemaker[stft]'`) when Chromaprint is unavailable
     4. Silence detection (`ffmpeg silencedetect`)
     5. User fallback durations
 - Encodes to MP3 with metadata (artist/album/title/track/genre).
