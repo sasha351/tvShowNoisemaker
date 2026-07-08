@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -38,33 +39,21 @@ _VALID_KEYS = {
 }
 
 
+@dataclass
 class Config:
     """Holds all runtime configuration options."""
 
-    def __init__(
-        self,
-        intro_duration: Optional[float] = None,
-        outro_duration: Optional[float] = None,
-        timestamps: Optional[Dict[str, Dict[str, float]]] = None,
-        mp3_bitrate: int = 192,
-        silence_db: float = -40.0,
-        min_silence_len: float = 0.5,
-        fingerprint_search_window: float = 300.0,
-        use_fingerprinting: bool = True,
-        log_file: Optional[str] = None,
-        workers: Optional[int] = None,
-    ) -> None:
-        self.intro_duration = intro_duration
-        self.outro_duration = outro_duration
-        self.workers = workers
-        # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
-        self.timestamps: Dict[str, Dict[str, float]] = timestamps or {}
-        self.mp3_bitrate = mp3_bitrate
-        self.silence_db = silence_db
-        self.min_silence_len = min_silence_len
-        self.fingerprint_search_window = fingerprint_search_window
-        self.use_fingerprinting = use_fingerprinting
-        self.log_file = log_file
+    intro_duration: Optional[float] = None
+    outro_duration: Optional[float] = None
+    # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
+    timestamps: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    mp3_bitrate: int = 192
+    silence_db: float = -40.0
+    min_silence_len: float = 0.5
+    fingerprint_search_window: float = 300.0
+    use_fingerprinting: bool = True
+    log_file: Optional[str] = None
+    workers: Optional[int] = None
 
 
 def load_config(config_path: Optional[str]) -> Dict[str, Any]:
