@@ -458,7 +458,6 @@ def run(args: argparse.Namespace) -> int:
         has_user_duration_override = (
             cfg.intro_duration is not None or cfg.outro_duration is not None
         )
-        fp_is, fp_ie, fp_os = fingerprint_results.get(filepath, (None, None, None))
         has_fingerprint_boundary = fp_ie is not None or fp_os is not None
         is_unresolved_defaults = (
             duration is not None

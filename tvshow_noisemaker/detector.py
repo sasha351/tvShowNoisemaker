@@ -548,7 +548,7 @@ def _check_fpcalc() -> bool:
             ["fpcalc", "-version"], capture_output=True, text=True, timeout=5
         )
         _fpcalc_available = result.returncode == 0
-    except (FileNotFoundError, Exception):
+    except Exception:  # pylint: disable=broad-except
         _fpcalc_available = False
     if _fpcalc_available:
         logger.info("fpcalc (Chromaprint) detected – using Chromaprint fingerprinting")
@@ -668,10 +668,7 @@ def _popcount32(arr: np.ndarray) -> np.ndarray:
 
 def _create_inverted_index(fp: np.ndarray) -> Dict[int, int]:
     """Map each fingerprint point value to the *last* index it appeared at."""
-    idx: Dict[int, int] = {}
-    for i in range(len(fp)):
-        idx[int(fp[i])] = i
-    return idx
+    return dict(zip(fp.tolist(), range(len(fp))))
 
 
 def _find_contiguous_range(
