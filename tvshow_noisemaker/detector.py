@@ -295,15 +295,17 @@ def _find_common_segment_bounds(
     sr: int,
     min_duration: float,
     max_duration: float,
-) -> Optional[Tuple[List[float], List[float]]]:
+) -> Optional[Tuple[int, int]]:
     """Find where a common segment starts and ends for each fingerprinted episode.
 
     Uses cross-correlation to align episodes (handles cold opens where the
     shared theme song starts at a different time in each episode), then
     finds the longest contiguous high-similarity run.
 
-    Returns ``(starts, ends)`` — two parallel lists of times in seconds,
-    or ``None`` if no common segment exceeding *min_duration* is found.
+    Returns ``(seg_start_frame, seg_len_frames)`` in the coordinate system
+    of the *reference* (first) fingerprint, or ``None`` if no common
+    segment exceeding *min_duration* is found.  Callers locate per-episode
+    boundaries by template-matching this segment against each episode.
     """
     hop_sec = _HOP_LENGTH / sr
     ref = fingerprints[0]
@@ -392,10 +394,7 @@ def _find_common_segment_bounds(
         best_len, best_len * hop_sec, threshold,
     )
 
-    # ── Step 5: per-episode start/end times ─────────────────────
-    starts = [max(0.0, (best_start - lag) * hop_sec) for lag in lags]
-    ends = [(segment_end_ref - lag) * hop_sec for lag in lags]
-    return starts, ends, best_start, best_len
+    return best_start, best_len
 
 
 def _match_template_position(
@@ -1042,7 +1041,7 @@ def detect_by_fingerprinting(
     search_window: float = 300.0,
     min_segment: float = 5.0,
     max_segment: float = 180.0,
-) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
     """Detect intro/outro boundaries for a batch of episode files.
 
     Compares audio fingerprints from the beginning (intro) and end (outro)
@@ -1062,9 +1061,9 @@ def detect_by_fingerprinting(
     Returns
     -------
     dict
-        Mapping of filepath → ``(intro_end, outro_start)`` in seconds.
-        Either boundary can be ``None`` when not confidently detected.
-        Files with insufficient audio are omitted.
+        Mapping of filepath → ``(intro_start, intro_end, outro_start)``
+        in seconds.  Any boundary can be ``None`` when not confidently
+        detected.  Files with insufficient audio are omitted.
     """
     # ── Chromaprint path (more accurate, inspired by intro-skipper) ──
     if _check_fpcalc():
@@ -1180,7 +1179,7 @@ def detect_by_fingerprinting(
     fp_intro_start_map: Dict[str, float] = {}
     fp_intro_end_map: Dict[str, float] = {}
     if intro_bounds is not None:
-        intro_starts_list, intro_ends_list, seg_start, seg_len = intro_bounds
+        seg_start, seg_len = intro_bounds
         # Extract the detected common segment from the reference fingerprint
         # with proportional padding so that the template captures transition
         # frames at the edges of the theme song.
@@ -1213,7 +1212,7 @@ def detect_by_fingerprinting(
     # ── Outro: template-match for precise per-episode boundaries ──
     fp_outro_from_end_map: Dict[str, float] = {}
     if outro_bounds is not None:
-        _, _, out_seg_start, out_seg_len = outro_bounds
+        out_seg_start, out_seg_len = outro_bounds
         ref_outro_rev = detection_outro_fps_rev[0]
         pad_sec = max(1.0, min(10.0, out_seg_len * hop_sec * 0.1))
         pad_frames = int(pad_sec / hop_sec)

@@ -150,15 +150,13 @@ def test_find_common_segment_bounds_no_cold_open():
 
     result = _find_common_segment_bounds(fps, sr=11025, min_duration=1.0, max_duration=60.0)
     assert result is not None
-    starts, ends, seg_start, seg_len = result
-    # Theme ends near frame 100 → ~4.6s at 11025 Hz / 512 hop
+    seg_start, seg_len = result
     hop_sec = 512 / 11025
-    expected_end = 100 * hop_sec
-    for val in ends:
-        assert abs(val - expected_end) < 3.0, f"Expected ~{expected_end:.1f}s, got {val:.1f}s"
-    # Theme starts at frame 0 → starts should be near 0
-    for val in starts:
-        assert val < 3.0, f"Expected start near 0s, got {val:.1f}s"
+    # Theme spans frames 0–100 in the reference episode.
+    assert seg_start * hop_sec < 3.0, f"Expected segment start near 0s, got {seg_start * hop_sec:.1f}s"
+    assert abs((seg_start + seg_len) * hop_sec - 100 * hop_sec) < 3.0, (
+        f"Expected segment end near {100 * hop_sec:.1f}s, got {(seg_start + seg_len) * hop_sec:.1f}s"
+    )
 
 
 def test_find_common_segment_bounds_with_cold_open():
@@ -180,19 +178,15 @@ def test_find_common_segment_bounds_with_cold_open():
 
     result = _find_common_segment_bounds([fp1, fp2, fp3], sr=11025, min_duration=1.0, max_duration=60.0)
     assert result is not None
-    starts, ends, seg_start, seg_len = result
-    assert len(ends) == 3
-    assert len(starts) == 3
-
+    seg_start, seg_len = result
     hop_sec = 512 / 11025
-    # Each episode should have intro_end near where its theme ends
-    expected_ends = [130 * hop_sec, 160 * hop_sec, 110 * hop_sec]
-    for got, exp in zip(ends, expected_ends):
-        assert abs(got - exp) < 3.0, f"Expected end ~{exp:.1f}s, got {got:.1f}s"
-    # Each episode should have intro_start near where its theme starts
-    expected_starts = [50 * hop_sec, 80 * hop_sec, 30 * hop_sec]
-    for got, exp in zip(starts, expected_starts):
-        assert abs(got - exp) < 3.0, f"Expected start ~{exp:.1f}s, got {got:.1f}s"
+    # In reference (fp1) coordinates the theme spans frames 50–130.
+    assert abs(seg_start * hop_sec - 50 * hop_sec) < 3.0, (
+        f"Expected segment start near {50 * hop_sec:.1f}s, got {seg_start * hop_sec:.1f}s"
+    )
+    assert abs((seg_start + seg_len) * hop_sec - 130 * hop_sec) < 3.0, (
+        f"Expected segment end near {130 * hop_sec:.1f}s, got {(seg_start + seg_len) * hop_sec:.1f}s"
+    )
 
 
 def test_find_common_segment_bounds_short_theme():
@@ -208,7 +202,7 @@ def test_find_common_segment_bounds_short_theme():
 
     result = _find_common_segment_bounds(fps, sr=11025, min_duration=0.5, max_duration=60.0)
     assert result is not None
-    _, _, seg_start, seg_len = result
+    seg_start, seg_len = result
     hop_sec = 512 / 11025
     assert seg_len * hop_sec >= 0.5, f"Detected segment too short: {seg_len * hop_sec:.1f}s"
 
@@ -226,7 +220,7 @@ def test_find_common_segment_bounds_long_theme():
 
     result = _find_common_segment_bounds(fps, sr=11025, min_duration=1.0, max_duration=60.0)
     assert result is not None
-    _, _, seg_start, seg_len = result
+    seg_start, seg_len = result
     hop_sec = 512 / 11025
     # Should capture most of the 200-frame theme (~9.3s)
     assert seg_len * hop_sec > 6.0, f"Long theme not fully captured: {seg_len * hop_sec:.1f}s"
