@@ -29,6 +29,7 @@ def _make_args(
     intro_duration=None,
     outro_duration=None,
     mp3_bitrate=None,
+    output_format=None,
     config=None,
     log_file=None,
     fingerprint=True,
@@ -48,6 +49,7 @@ def _make_args(
     a.intro_duration = intro_duration
     a.outro_duration = outro_duration
     a.mp3_bitrate = mp3_bitrate
+    a.output_format = output_format
     a.config = config
     a.log_file = log_file
     a.fingerprint = fingerprint
@@ -85,6 +87,21 @@ def test_parser_no_fingerprint_flag():
 def test_parser_custom_bitrate():
     args = _parse("--input-dir /in --output-dir /out --mp3-bitrate 320")
     assert args.mp3_bitrate == 320
+
+
+def test_parser_bitrate_alias():
+    args = _parse("--input-dir /in --output-dir /out --bitrate 320")
+    assert args.mp3_bitrate == 320
+
+
+def test_parser_format():
+    args = _parse("--input-dir /in --output-dir /out --format flac")
+    assert args.output_format == "flac"
+
+
+def test_parser_format_default_none():
+    args = _parse("--input-dir /in --output-dir /out")
+    assert args.output_format is None
 
 
 def test_parser_benchmark_fingerprint_flag():

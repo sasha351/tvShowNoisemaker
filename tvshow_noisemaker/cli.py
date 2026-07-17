@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from tvshow_noisemaker.config import build_config, load_config
+from tvshow_noisemaker.config import VALID_OUTPUT_FORMATS, build_config, load_config
 from tvshow_noisemaker.detector import (
     detect_by_fingerprinting,
     get_last_fingerprint_stats,
@@ -149,11 +149,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fallback outro duration in seconds from the end of the file.",
     )
     parser.add_argument(
-        "--mp3-bitrate",
+        "--format",
+        dest="output_format",
+        choices=sorted(VALID_OUTPUT_FORMATS),
+        default=None,
+        help="Output audio format (default: mp3).",
+    )
+    parser.add_argument(
+        "--bitrate", "--mp3-bitrate",
+        dest="mp3_bitrate",
         type=int,
         default=None,
         metavar="KBPS",
-        help="MP3 encoding bitrate in kbps (default: 256).",
+        help="Encoding bitrate in kbps for mp3/m4a (default: 256).",
     )
 
     # Config file
@@ -164,7 +172,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to a JSON config file.  CLI flags take precedence.  "
             "Supports keys: intro_duration, outro_duration, timestamps, "
-            "mp3_bitrate, silence_db, min_silence_len, fingerprint_search_window."
+            "mp3_bitrate, output_format, silence_db, min_silence_len, "
+            "fingerprint_search_window."
         ),
     )
 
@@ -519,7 +528,7 @@ def run(args: argparse.Namespace) -> int:
     def _encode_one(filepath: str, basename: str, intro_start: float,
                     intro_end: float, outro_start: float,
                     content_duration: float, trimmed: float) -> tuple:
-        output_path = build_output_path(filepath, str(output_dir))
+        output_path = build_output_path(filepath, str(output_dir), cfg.output_format)
         metadata = infer_track_metadata(filepath, str(input_dir))
         file_start = time.monotonic()
         process_file(
@@ -529,6 +538,7 @@ def run(args: argparse.Namespace) -> int:
             outro_start=outro_start,
             intro_start=intro_start,
             mp3_bitrate=cfg.mp3_bitrate,
+            output_format=cfg.output_format,
             metadata=metadata,
         )
         file_elapsed = time.monotonic() - file_start
@@ -596,7 +606,9 @@ def run(args: argparse.Namespace) -> int:
     con.info("  Audio kept          : %s", _fmt_duration(total_content_secs))
     con.info("  Audio trimmed       : %s", _fmt_duration(total_trimmed_secs))
     con.info("  Total output size   : %s", _fmt_bytes(total_output_bytes))
-    con.info("  MP3 bitrate         : %d kbps", cfg.mp3_bitrate)
+    con.info("  Output format       : %s", cfg.output_format)
+    if cfg.output_format in ("mp3", "m4a"):
+        con.info("  Bitrate             : %d kbps", cfg.mp3_bitrate)
     con.info("  Conversion time     : %s", _fmt_duration(batch_elapsed))
     con.info("  Total runtime       : %s", _fmt_duration(total_elapsed))
     con.info(

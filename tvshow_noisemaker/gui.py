@@ -14,6 +14,9 @@ from typing import Optional
 
 _TOTAL_RE = re.compile(r"Starting conversion\s+\((\d+) files")
 _POLL_MS = 100
+_FORMATS = ("mp3", "m4a", "flac", "wav")
+_LOSSLESS_FORMATS = ("flac", "wav")
+_BITRATES = ("128", "192", "256", "320")
 
 
 def parse_total(line: str) -> Optional[int]:
@@ -78,7 +81,8 @@ class App:
 
         self.dst = tk.StringVar(value=str(Path.home() / "Downloads"))
         self._source_folders_row(frm)
-        self._path_row(frm, "Destination folder (MP3s):", self.dst)
+        self._path_row(frm, "Destination folder (audio):", self.dst)
+        self._options_row(frm)
 
         self.start_btn = ttk.Button(frm, text="Start", command=self._start_or_cancel)
         self.start_btn.pack(pady=6)
@@ -111,6 +115,31 @@ class App:
             row, text="Browse…",
             command=lambda: var.set(filedialog.askdirectory() or var.get()),
         ).pack(side="left")
+
+    def _options_row(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=2)
+
+        self.output_format = tk.StringVar(value="mp3")
+        ttk.Label(row, text="Format:").pack(side="left")
+        fmt_box = ttk.Combobox(
+            row, textvariable=self.output_format, values=_FORMATS,
+            state="readonly", width=6,
+        )
+        fmt_box.pack(side="left", padx=(4, 16))
+        fmt_box.bind("<<ComboboxSelected>>", self._on_format_change)
+
+        self.bitrate = tk.StringVar(value="256")
+        ttk.Label(row, text="Quality:").pack(side="left")
+        self.quality_box = ttk.Combobox(
+            row, textvariable=self.bitrate, values=_BITRATES,
+            state="readonly", width=6,
+        )
+        self.quality_box.pack(side="left", padx=4)
+
+    def _on_format_change(self, *_args) -> None:
+        lossless = self.output_format.get() in _LOSSLESS_FORMATS
+        self.quality_box.config(state="disabled" if lossless else "readonly")
 
     def _source_folders_row(self, parent: ttk.Frame) -> None:
         row = ttk.Frame(parent)
@@ -219,7 +248,10 @@ class App:
         cmd = [
             sys.executable, "-u", "-m", "tvshow_noisemaker.cli",
             "-i", self.current_folder, "-o", out_dir,
+            "--format", self.output_format.get(),
         ]
+        if self.output_format.get() not in _LOSSLESS_FORMATS:
+            cmd.extend(["--bitrate", self.bitrate.get()])
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

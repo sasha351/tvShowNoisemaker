@@ -23,6 +23,14 @@ def test_build_output_path_different_extension():
     assert result == "/out/episode.mp3"
 
 
+@pytest.mark.parametrize("fmt, ext", [
+    ("mp3", ".mp3"), ("m4a", ".m4a"), ("flac", ".flac"), ("wav", ".wav"),
+])
+def test_build_output_path_formats(fmt, ext):
+    result = build_output_path("/data/episode.mp4", "/out", fmt)
+    assert result == f"/out/episode{ext}"
+
+
 # ---------------------------------------------------------------------------
 # process_file
 # ---------------------------------------------------------------------------
@@ -146,6 +154,46 @@ def test_process_file_raises_if_ffmpeg_not_found(tmp_path):
                 intro_end=30.0,
                 outro_start=2550.0,
             )
+
+
+@pytest.mark.parametrize("fmt, expected_codec_args, bitrate_expected", [
+    ("mp3", ["-acodec", "libmp3lame"], True),
+    ("m4a", ["-acodec", "aac"], True),
+    ("flac", ["-acodec", "flac"], False),
+    ("wav", ["-acodec", "pcm_s16le"], False),
+])
+def test_process_file_codec_per_format(tmp_path, fmt, expected_codec_args, bitrate_expected):
+    output_path = str(tmp_path / f"ep01.{fmt}")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=output_path,
+            intro_end=30.0,
+            outro_start=2550.0,
+            output_format=fmt,
+        )
+    cmd = mock_run.call_args[0][0]
+    idx = cmd.index("-acodec")
+    assert cmd[idx:idx + 2] == expected_codec_args
+    assert ("-ab" in cmd) == bitrate_expected
+
+
+def test_process_file_flac_no_id3v2(tmp_path):
+    output_path = str(tmp_path / "ep01.flac")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=output_path,
+            intro_end=30.0,
+            outro_start=2550.0,
+            output_format="flac",
+            metadata={"artist": "The Office"},
+        )
+    cmd = mock_run.call_args[0][0]
+    assert "-id3v2_version" not in cmd
+    assert "artist=The Office" in cmd
 
 
 def test_process_file_concat_with_cold_open(tmp_path):

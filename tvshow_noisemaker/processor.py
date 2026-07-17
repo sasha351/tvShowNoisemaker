@@ -19,6 +19,22 @@ logger = logging.getLogger(__name__)
 # Minimum pre-intro content (seconds) to bother preserving via concat.
 _MIN_COLD_OPEN = 1.0
 
+# format name -> (extension, codec args, uses_bitrate)
+_FORMATS = {
+    "mp3": (".mp3", ["-acodec", "libmp3lame"], True),
+    "m4a": (".m4a", ["-acodec", "aac"], True),
+    "flac": (".flac", ["-acodec", "flac"], False),
+    "wav": (".wav", ["-acodec", "pcm_s16le"], False),
+}
+
+
+def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
+    _, codec_args, uses_bitrate = _FORMATS[output_format]
+    args = list(codec_args)
+    if uses_bitrate:
+        args.extend(["-ab", f"{mp3_bitrate}k"])
+    return args
+
 
 def process_file(
     input_path: str,
@@ -27,6 +43,7 @@ def process_file(
     outro_start: float,
     intro_start: float = 0.0,
     mp3_bitrate: int = 256,
+    output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
@@ -46,7 +63,10 @@ def process_file(
         this (the cold open) is preserved.  When 0 the behaviour is
         the same as a simple seek to *intro_end*.
     mp3_bitrate:
-        MP3 encoding bitrate in kbps (e.g. 256).
+        Encoding bitrate in kbps (e.g. 256) for lossy formats (mp3, m4a).
+        Ignored for lossless formats (flac, wav).
+    output_format:
+        One of "mp3", "m4a", "flac", "wav".
     metadata:
         Optional output tags to write into the MP3 with ffmpeg.
 
@@ -72,13 +92,13 @@ def process_file(
         cmd = _build_concat_cmd(
             input_path, output_path,
             intro_start, intro_end, outro_start,
-            mp3_bitrate, metadata,
+            mp3_bitrate, output_format, metadata,
         )
     else:
         cmd = _build_simple_cmd(
             input_path, output_path,
             intro_end, outro_start,
-            mp3_bitrate, metadata,
+            mp3_bitrate, output_format, metadata,
         )
 
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
@@ -114,6 +134,7 @@ def _build_simple_cmd(
     intro_end: float,
     outro_start: float,
     mp3_bitrate: int,
+    output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
 ) -> list:
     """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
@@ -126,11 +147,10 @@ def _build_simple_cmd(
         "-i", input_path,
         "-map", "0:a:0",
         "-vn",
-        "-acodec", "libmp3lame",
-        "-ab", f"{mp3_bitrate}k",
+        *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
     ]
-    cmd.extend(_build_metadata_args(metadata))
+    cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)
     return cmd
 
@@ -142,6 +162,7 @@ def _build_concat_cmd(
     intro_end: float,
     outro_start: float,
     mp3_bitrate: int,
+    output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
 ) -> list:
     """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
@@ -157,20 +178,21 @@ def _build_concat_cmd(
         "-filter_complex", filter_complex,
         "-map", "[out]",
         "-vn",
-        "-acodec", "libmp3lame",
-        "-ab", f"{mp3_bitrate}k",
+        *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
     ]
-    cmd.extend(_build_metadata_args(metadata))
+    cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)
     return cmd
 
 
-def _build_metadata_args(metadata: Optional[dict[str, str]]) -> list[str]:
+def _build_metadata_args(
+    metadata: Optional[dict[str, str]], output_format: str = "mp3"
+) -> list[str]:
     if not metadata:
         return []
 
-    args = ["-id3v2_version", "3"]
+    args = ["-id3v2_version", "3"] if output_format == "mp3" else []
     for key in ("artist", "album", "title", "track", "genre"):
         value = metadata.get(key)
         if value:
@@ -178,7 +200,8 @@ def _build_metadata_args(metadata: Optional[dict[str, str]]) -> list[str]:
     return args
 
 
-def build_output_path(input_path: str, output_dir: str) -> str:
-    """Derive the output ``.mp3`` path from *input_path* and *output_dir*."""
+def build_output_path(input_path: str, output_dir: str, output_format: str = "mp3") -> str:
+    """Derive the output path from *input_path* and *output_dir* for *output_format*."""
     stem = Path(input_path).stem
-    return str(Path(output_dir) / f"{stem}.mp3")
+    ext, _, _ = _FORMATS[output_format]
+    return str(Path(output_dir) / f"{stem}{ext}")

@@ -9,6 +9,7 @@ Supports a JSON config file with the following optional keys:
             "episode_s01e01.mp4": {"intro_end": 30.0, "outro_start": 2580.0}
         },
         "mp3_bitrate": 256,
+        "output_format": "mp3",
         "silence_db": -40.0,
         "min_silence_len": 0.5,
         "fingerprint_search_window": 300.0
@@ -33,10 +34,13 @@ _VALID_KEYS = {
     "outro_duration",
     "timestamps",
     "mp3_bitrate",
+    "output_format",
     "silence_db",
     "min_silence_len",
     "fingerprint_search_window",
 }
+
+VALID_OUTPUT_FORMATS = {"mp3", "m4a", "flac", "wav"}
 
 
 @dataclass
@@ -48,6 +52,7 @@ class Config:
     # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
     timestamps: Dict[str, Dict[str, float]] = field(default_factory=dict)
     mp3_bitrate: int = 256
+    output_format: str = "mp3"
     silence_db: float = -40.0
     min_silence_len: float = 0.5
     fingerprint_search_window: float = 300.0
@@ -100,6 +105,15 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
             raise ValueError(f"Config key 'mp3_bitrate' must be a positive integer, got {val!r}")
         validated["mp3_bitrate"] = val
 
+    if "output_format" in raw:
+        val = raw["output_format"]
+        if val not in VALID_OUTPUT_FORMATS:
+            raise ValueError(
+                f"Config key 'output_format' must be one of "
+                f"{sorted(VALID_OUTPUT_FORMATS)}, got {val!r}"
+            )
+        validated["output_format"] = val
+
     if "timestamps" in raw:
         ts = raw["timestamps"]
         if not isinstance(ts, dict):
@@ -144,6 +158,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
     intro_duration = _pick(getattr(args, "intro_duration", None), "intro_duration", None)
     outro_duration = _pick(getattr(args, "outro_duration", None), "outro_duration", None)
     mp3_bitrate = _pick(getattr(args, "mp3_bitrate", None), "mp3_bitrate", 256)
+    output_format = _pick(getattr(args, "output_format", None), "output_format", "mp3")
     silence_db = _pick(getattr(args, "silence_db", None), "silence_db", -40.0)
     min_silence_len = _pick(getattr(args, "min_silence_len", None), "min_silence_len", 0.5)
     fingerprint_search_window = _pick(
@@ -161,6 +176,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         outro_duration=outro_duration,
         timestamps=timestamps,
         mp3_bitrate=int(mp3_bitrate),
+        output_format=output_format,
         silence_db=float(silence_db),
         min_silence_len=float(min_silence_len),
         fingerprint_search_window=float(fingerprint_search_window),
