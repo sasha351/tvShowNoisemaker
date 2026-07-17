@@ -1,4 +1,4 @@
-"""Bare-bones tkinter GUI wrapping the tvshow-noisemaker CLI."""
+"""CustomTkinter GUI wrapping the tvshow-noisemaker CLI."""
 from __future__ import annotations
 
 import queue
@@ -9,8 +9,10 @@ import threading
 import tkinter as tk
 from collections import Counter
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 from typing import Optional
+
+import customtkinter as ctk
 
 _TOTAL_RE = re.compile(r"Starting conversion\s+\((\d+) files")
 _POLL_MS = 100
@@ -56,11 +58,21 @@ def format_folder_progress(
     return f"{prefix}: Detecting intro/outro…"
 
 
+def friendly_result_line(line: str) -> str:
+    """Condense a raw CLI result line into a short activity-feed line, e.g. '✓ ep01.mp3'."""
+    stripped = line.strip()
+    if "✓ Done" in stripped:
+        m = re.search(r"→\s*(\S+)", stripped)
+        name = Path(m.group(1)).name if m else stripped
+        return f"✓ {name}"
+    return stripped
+
+
 class App:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         root.title("TV Show Noisemaker")
-        root.geometry("700x500")
+        root.geometry("640x680")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.proc: Optional[subprocess.Popen] = None
@@ -75,97 +87,88 @@ class App:
         self.total_folders = 0
         self.batch_cancelled = False
         self.folder_failures: list[str] = []
+        self._folder_row_buttons: list[ctk.CTkButton] = []
+        self._details_shown = False
 
-        frm = ttk.Frame(root, padding=10)
-        frm.pack(fill="both", expand=True)
+        frm = ctk.CTkFrame(root, fg_color="transparent")
+        frm.pack(fill="both", expand=True, padx=20, pady=20)
 
         self.dst = tk.StringVar(value=str(Path.home() / "Downloads"))
-        self._source_folders_row(frm)
-        self._path_row(frm, "Destination folder (audio):", self.dst)
+        self._shows_section(frm)
+        self._destination_row(frm)
         self._options_row(frm)
+        self._status_card(frm)
+        self._activity_feed(frm)
 
-        self.start_btn = ttk.Button(frm, text="Start", command=self._start_or_cancel)
-        self.start_btn.pack(pady=6)
+        self.start_btn = ctk.CTkButton(
+            frm, text="Start", height=40, command=self._start_or_cancel
+        )
+        self.start_btn.pack(fill="x", pady=(12, 6))
 
-        self.bar = ttk.Progressbar(frm, mode="indeterminate")
-        self.bar.pack(fill="x", pady=4)
-
-        self.status = ttk.Label(frm, text="Pick source and destination folders.")
-        self.status.pack(anchor="w")
-
-        log_frame = ttk.Frame(frm)
-        log_frame.pack(fill="both", expand=True, pady=(6, 0))
-        self.log = tk.Text(log_frame, state="disabled", wrap="none", height=15)
-        scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.log.pack(side="left", fill="both", expand=True)
+        self._details_toggle(frm)
 
         self.dst.trace_add("write", self._update_start_state)
         self._update_start_state()
 
-    def _path_row(self, parent: ttk.Frame, label: str, var: tk.StringVar) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=2)
-        ttk.Label(row, text=label, width=24).pack(side="left")
-        ttk.Entry(row, textvariable=var, state="readonly").pack(
-            side="left", fill="x", expand=True, padx=4
+    # -- Shows -----------------------------------------------------------
+
+    def _shows_section(self, parent: ctk.CTkFrame) -> None:
+        ctk.CTkLabel(
+            parent, text="Shows", font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("gray40", "gray60"), anchor="w",
+        ).pack(fill="x")
+        self.src_frame = ctk.CTkScrollableFrame(parent, height=110)
+        self.src_frame.pack(fill="x", pady=(4, 4))
+        self.add_folder_btn = ctk.CTkButton(
+            parent, text="＋ Add Folders…", fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"), command=self._add_source_folder,
         )
-        ttk.Button(
-            row, text="Browse…",
-            command=lambda: var.set(filedialog.askdirectory() or var.get()),
-        ).pack(side="left")
+        self.add_folder_btn.pack(fill="x", pady=(0, 12))
+        self._render_source_rows()
 
-    def _options_row(self, parent: ttk.Frame) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=2)
+    def _render_source_rows(self) -> None:
+        for child in self.src_frame.winfo_children():
+            child.destroy()
+        self._folder_row_buttons = []
+        for folder in self.src_folders:
+            row = ctk.CTkFrame(self.src_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                info, text=Path(folder).name, font=ctk.CTkFont(weight="bold"), anchor="w",
+            ).pack(fill="x")
+            ctk.CTkLabel(
+                info, text=folder, font=ctk.CTkFont(size=11),
+                text_color=("gray40", "gray60"), anchor="w",
+            ).pack(fill="x")
+            remove_btn = ctk.CTkButton(
+                row, text="✕", width=28, height=28, fg_color="transparent",
+                text_color=("gray40", "gray60"), hover_color=("gray80", "gray30"),
+                command=lambda f=folder: self._remove_folder(f),
+            )
+            remove_btn.pack(side="right")
+            self._folder_row_buttons.append(remove_btn)
 
-        self.output_format = tk.StringVar(value="mp3")
-        ttk.Label(row, text="Format:").pack(side="left")
-        fmt_box = ttk.Combobox(
-            row, textvariable=self.output_format, values=_FORMATS,
-            state="readonly", width=6,
-        )
-        fmt_box.pack(side="left", padx=(4, 16))
-        fmt_box.bind("<<ComboboxSelected>>", self._on_format_change)
+    def _add_source_folder(self) -> None:
+        for folder in self._choose_folders():
+            if folder and folder not in self.src_folders:
+                self.src_folders.append(folder)
+        self._render_source_rows()
+        dupes = basename_collisions(self.src_folders)
+        if dupes:
+            messagebox.showwarning(
+                "Duplicate folder name",
+                "These source folders share the same name and will write into "
+                "the same output subfolder, possibly overwriting each other:\n\n"
+                + ", ".join(dupes),
+            )
+        self._update_start_state()
 
-        self.bitrate = tk.StringVar(value="256")
-        ttk.Label(row, text="Quality:").pack(side="left")
-        self.quality_box = ttk.Combobox(
-            row, textvariable=self.bitrate, values=_BITRATES,
-            state="readonly", width=6,
-        )
-        self.quality_box.pack(side="left", padx=4)
-
-    def _on_format_change(self, *_args) -> None:
-        lossless = self.output_format.get() in _LOSSLESS_FORMATS
-        self.quality_box.config(state="disabled" if lossless else "readonly")
-
-    def _source_folders_row(self, parent: ttk.Frame) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=2)
-        ttk.Label(row, text="Source folders (videos):", width=24).pack(side="left", anchor="n")
-
-        list_frame = ttk.Frame(row)
-        list_frame.pack(side="left", fill="both", expand=True, padx=4)
-        self.src_listbox = tk.Listbox(
-            list_frame, height=4, selectmode="extended", exportselection=False
-        )
-        self.src_listbox.pack(side="left", fill="both", expand=True)
-        lb_scroll = ttk.Scrollbar(list_frame, command=self.src_listbox.yview)
-        self.src_listbox.configure(yscrollcommand=lb_scroll.set)
-        lb_scroll.pack(side="left", fill="y")
-
-        btn_col = ttk.Frame(row)
-        btn_col.pack(side="left")
-        self.add_folder_btn = ttk.Button(
-            btn_col, text="Add Folder…", command=self._add_source_folder
-        )
-        self.add_folder_btn.pack(fill="x")
-        self.remove_folder_btn = ttk.Button(
-            btn_col, text="Remove Selected", command=self._remove_selected_folders
-        )
-        self.remove_folder_btn.pack(fill="x", pady=(4, 0))
+    def _remove_folder(self, folder: str) -> None:
+        self.src_folders.remove(folder)
+        self._render_source_rows()
+        self._update_start_state()
 
     def _choose_folders(self) -> list[str]:
         """Prompt for one or more source folders (cmd+click multi-select on macOS)."""
@@ -191,38 +194,98 @@ class App:
         folder = filedialog.askdirectory()
         return [folder] if folder else []
 
-    def _add_source_folder(self) -> None:
-        for folder in self._choose_folders():
-            if folder and folder not in self.src_folders:
-                self.src_folders.append(folder)
-                self.src_listbox.insert("end", folder)
-        dupes = basename_collisions(self.src_folders)
-        if dupes:
-            messagebox.showwarning(
-                "Duplicate folder name",
-                "These source folders share the same name and will write into "
-                "the same output subfolder, possibly overwriting each other:\n\n"
-                + ", ".join(dupes),
-            )
-        self._update_start_state()
+    # -- Destination & options --------------------------------------------
 
-    def _remove_selected_folders(self) -> None:
-        for idx in reversed(self.src_listbox.curselection()):
-            self.src_listbox.delete(idx)
-            del self.src_folders[idx]
-        self._update_start_state()
+    def _destination_row(self, parent: ctk.CTkFrame) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        ctk.CTkLabel(row, text="Destination folder (audio):", width=180, anchor="w").pack(
+            side="left"
+        )
+        ctk.CTkEntry(row, textvariable=self.dst, state="readonly").pack(
+            side="left", fill="x", expand=True, padx=4
+        )
+        ctk.CTkButton(
+            row, text="Choose…", width=90,
+            command=lambda: self.dst.set(filedialog.askdirectory() or self.dst.get()),
+        ).pack(side="left")
+
+    def _options_row(self, parent: ctk.CTkFrame) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 2))
+
+        self.output_format = tk.StringVar(value="mp3")
+        ctk.CTkLabel(row, text="Format:").pack(side="left")
+        ctk.CTkOptionMenu(
+            row, values=list(_FORMATS), variable=self.output_format, width=90,
+            command=self._on_format_change,
+        ).pack(side="left", padx=(4, 16))
+
+        self.bitrate = tk.StringVar(value="256")
+        ctk.CTkLabel(row, text="Quality:").pack(side="left")
+        self.quality_menu = ctk.CTkOptionMenu(
+            row, values=list(_BITRATES), variable=self.bitrate, width=90,
+        )
+        self.quality_menu.pack(side="left", padx=4)
+
+    def _on_format_change(self, *_args) -> None:
+        lossless = self.output_format.get() in _LOSSLESS_FORMATS
+        self.quality_menu.configure(state="disabled" if lossless else "normal")
+
+    # -- Status card & activity feed --------------------------------------
+
+    def _status_card(self, parent: ctk.CTkFrame) -> None:
+        card = ctk.CTkFrame(parent, corner_radius=12)
+        card.pack(fill="x", pady=(12, 6))
+        self.status = ctk.CTkLabel(
+            card, text="Pick source and destination folders.",
+            font=ctk.CTkFont(size=15), anchor="w",
+        )
+        self.status.pack(fill="x", padx=16, pady=(12, 8))
+        self.bar = ctk.CTkProgressBar(card)
+        self.bar.pack(fill="x", padx=16, pady=(0, 16))
+        self.bar.set(0)
+
+    def _activity_feed(self, parent: ctk.CTkFrame) -> None:
+        self.activity = ctk.CTkTextbox(parent, state="disabled", wrap="word", height=140)
+        self.activity.pack(fill="both", expand=True)
+
+    def _details_toggle(self, parent: ctk.CTkFrame) -> None:
+        self.details_btn = ctk.CTkButton(
+            parent, text="Show details ▸", fg_color="transparent", anchor="w", height=24,
+            text_color=("gray30", "gray70"), hover_color=("gray90", "gray20"),
+            command=self._toggle_details,
+        )
+        self.details_btn.pack(fill="x")
+        self.details_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.log = ctk.CTkTextbox(
+            self.details_frame, state="disabled", wrap="none", height=140,
+            font=("Menlo", 11),
+        )
+        self.log.pack(fill="both", expand=True)
+
+    def _toggle_details(self) -> None:
+        self._details_shown = not self._details_shown
+        if self._details_shown:
+            self.details_frame.pack(fill="both", expand=True, pady=(4, 0))
+            self.details_btn.configure(text="Hide details ▾")
+        else:
+            self.details_frame.pack_forget()
+            self.details_btn.configure(text="Show details ▸")
+
+    # -- Run state ---------------------------------------------------------
 
     def _update_start_state(self, *_args) -> None:
         if self.proc is None:
             ok = bool(self.src_folders) and bool(self.dst.get())
-            self.start_btn.config(state="normal" if ok else "disabled")
+            self.start_btn.configure(state="normal" if ok else "disabled")
 
     def _start_or_cancel(self) -> None:
         if self.proc is not None:
             self.batch_cancelled = True
             self.pending_folders.clear()
             self.proc.terminate()
-            self.status.config(text="Cancelling…")
+            self.status.configure(text="Cancelling…")
             return
         self.batch_cancelled = False
         self.folder_failures = []
@@ -230,8 +293,10 @@ class App:
         self.total_folders = len(self.pending_folders)
         self.folder_index = 0
         self._log_clear()
-        self.add_folder_btn.config(state="disabled")
-        self.remove_folder_btn.config(state="disabled")
+        self._activity_clear()
+        self.add_folder_btn.configure(state="disabled")
+        for btn in self._folder_row_buttons:
+            btn.configure(state="disabled")
         self._advance_to_next_folder()
 
     def _advance_to_next_folder(self) -> None:
@@ -245,6 +310,9 @@ class App:
         name = Path(self.current_folder).name
         out_dir = output_subdir_for(self.current_folder, self.dst.get())
         self._log_append(f"== {name} ({self.folder_index}/{self.total_folders}) ==")
+        if self.folder_index > 1:
+            self._activity_append("")
+        self._activity_append(f"{name} ({self.folder_index}/{self.total_folders})")
         cmd = [
             sys.executable, "-u", "-m", "tvshow_noisemaker.cli",
             "-i", self.current_folder, "-o", out_dir,
@@ -263,10 +331,10 @@ class App:
             self._advance_to_next_folder()
             return
         threading.Thread(target=self._reader, daemon=True).start()
-        self.start_btn.config(text="Cancel")
-        self.bar.config(mode="indeterminate")
-        self.bar.start(80)
-        self.status.config(
+        self.start_btn.configure(text="Cancel")
+        self.bar.configure(mode="indeterminate")
+        self.bar.start()
+        self.status.configure(
             text=format_folder_progress(self.folder_index, self.total_folders, name, 0, 0)
         )
         self.root.after(_POLL_MS, self._poll)
@@ -298,17 +366,19 @@ class App:
             # ✗ Skipped lines can arrive before this one — carry them over.
             self.total = total
             self.bar.stop()
-            self.bar.config(mode="determinate", maximum=total, value=self.done)
-            self.status.config(
+            self.bar.configure(mode="determinate")
+            self.bar.set(self.done / total if total else 0)
+            self.status.configure(
                 text=format_folder_progress(
                     self.folder_index, self.total_folders, name, self.done, total
                 )
             )
         elif is_file_result(line):
             self.done += 1
+            self._activity_append(friendly_result_line(line))
             if self.total:
-                self.bar.config(value=self.done)
-                self.status.config(
+                self.bar.set(self.done / self.total)
+                self.status.configure(
                     text=format_folder_progress(
                         self.folder_index, self.total_folders, name, self.done, self.total
                     )
@@ -329,31 +399,44 @@ class App:
     def _batch_finished(self, cancelled: bool = False) -> None:
         self.current_folder = None
         self.bar.stop()
-        self.bar.config(mode="determinate", value=0)
+        self.bar.configure(mode="determinate")
+        self.bar.set(0)
         if cancelled:
-            self.status.config(text="Cancelled.")
+            self.status.configure(text="Cancelled.")
         elif self.folder_failures:
-            self.status.config(
+            self.status.configure(
                 text=f"Done — {self.folder_index}/{self.total_folders} folder(s), "
                 f"{len(self.folder_failures)} failed: {', '.join(self.folder_failures)}"
             )
         else:
-            self.status.config(text=f"Done — {self.total_folders} folder(s) processed.")
-        self.start_btn.config(text="Start")
-        self.add_folder_btn.config(state="normal")
-        self.remove_folder_btn.config(state="normal")
+            self.status.configure(text=f"Done — {self.total_folders} folder(s) processed.")
+        self.start_btn.configure(text="Start")
+        self.add_folder_btn.configure(state="normal")
+        for btn in self._folder_row_buttons:
+            btn.configure(state="normal")
         self._update_start_state()
 
     def _log_append(self, line: str) -> None:
-        self.log.config(state="normal")
+        self.log.configure(state="normal")
         self.log.insert("end", line + "\n")
         self.log.see("end")
-        self.log.config(state="disabled")
+        self.log.configure(state="disabled")
 
     def _log_clear(self) -> None:
-        self.log.config(state="normal")
+        self.log.configure(state="normal")
         self.log.delete("1.0", "end")
-        self.log.config(state="disabled")
+        self.log.configure(state="disabled")
+
+    def _activity_append(self, line: str) -> None:
+        self.activity.configure(state="normal")
+        self.activity.insert("end", line + "\n")
+        self.activity.see("end")
+        self.activity.configure(state="disabled")
+
+    def _activity_clear(self) -> None:
+        self.activity.configure(state="normal")
+        self.activity.delete("1.0", "end")
+        self.activity.configure(state="disabled")
 
     def _on_close(self) -> None:
         self.batch_cancelled = True
@@ -364,7 +447,9 @@ class App:
 
 
 def main() -> None:
-    root = tk.Tk()
+    ctk.set_appearance_mode("system")
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk()
     App(root)
     root.mainloop()
 

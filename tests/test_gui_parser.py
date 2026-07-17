@@ -5,6 +5,7 @@ from tvshow_noisemaker.gui import (
     basename_collisions,
     parse_chosen_folders,
     format_folder_progress,
+    friendly_result_line,
 )
 
 
@@ -59,3 +60,13 @@ def test_format_folder_progress_with_total():
         format_folder_progress(2, 3, "Show", 4, 10)
         == "Folder 2/3 (Show): Converting 4/10…"
     )
+
+
+def test_friendly_result_line_condenses_done_to_filename():
+    line = "  ✓ Done in 3.2s → /tmp/out/ep01.mp3 (4.1 MB)"
+    assert friendly_result_line(line) == "✓ ep01.mp3"
+
+
+def test_friendly_result_line_passes_through_skipped_and_failed():
+    assert friendly_result_line("  ✗ Skipped – no boundaries resolved") == "✗ Skipped – no boundaries resolved"
+    assert friendly_result_line("  ✗ Failed – ep02.mkv: ffmpeg exited 1") == "✗ Failed – ep02.mkv: ffmpeg exited 1"
