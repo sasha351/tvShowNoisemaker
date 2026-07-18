@@ -402,6 +402,37 @@ def test_run_parallel_multiple_files(tmp_path):
     assert mock_proc.call_count == 3
 
 
+def test_run_retries_failed_duration_probe(tmp_path):
+    """A file that fails the first (parallel) duration probe but succeeds on
+    the sequential retry should still be processed, not silently excluded."""
+    for name in ("ep01.mp4", "ep02.mp4"):
+        (tmp_path / name).touch()
+
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        workers=2,
+    )
+
+    def _duration_side_effect(fp, timeout=30.0):
+        if fp.endswith("ep02.mp4") and timeout == 30.0:
+            return None  # fails first pass; retry pass uses timeout=120.0
+        return 2700.0
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", side_effect=_duration_side_effect),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+
+    assert exit_code == 0
+    assert mock_proc.call_count == 2
+
+
 def test_run_parallelizes_boundary_resolution(tmp_path):
     """Boundary resolution should run concurrently when workers > 1."""
     for name in ("ep01.mp4", "ep02.mp4", "ep03.mp4"):

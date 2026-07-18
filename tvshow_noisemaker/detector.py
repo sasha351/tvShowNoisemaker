@@ -73,6 +73,12 @@ _POPCOUNT_LUT = np.array([bin(i).count('1') for i in range(256)], dtype=np.int32
 # Cached result of fpcalc availability check.
 _fpcalc_available: Optional[bool] = None
 
+# Silence-snap refinement (intro-skipper: AdjustWindow* / SilenceDetection*)
+_REFINE_WINDOW_BEFORE = 5.0   # seconds searched before a detected boundary
+_REFINE_WINDOW_AFTER = 2.0    # seconds searched after a detected boundary
+_REFINE_NOISE_DB = -50.0
+_REFINE_MIN_SILENCE = 0.33
+
 
 @dataclass
 class FingerprintStats:
@@ -105,7 +111,7 @@ def get_last_fingerprint_stats() -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def get_duration(filepath: str) -> Optional[float]:
+def get_duration(filepath: str, timeout: float = 30.0) -> Optional[float]:
     """Return the duration of *filepath* in seconds using ``ffprobe``.
 
     Returns ``None`` if the duration cannot be determined.
@@ -118,7 +124,7 @@ def get_duration(filepath: str) -> Optional[float]:
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30
+            cmd, capture_output=True, text=True, timeout=timeout
         )
         if result.returncode != 0:
             logger.debug("ffprobe returned non-zero for %s: %s", filepath, result.stderr)
@@ -992,12 +998,99 @@ def _detect_by_chromaprint(
 # ---------------------------------------------------------------------------
 
 
+def _snap_to_silence(filepath: str, t: float, duration: float) -> float:
+    """Snap boundary *t* to the start of the nearest silence within
+    [t - _REFINE_WINDOW_BEFORE, t + _REFINE_WINDOW_AFTER].
+
+    Mirrors intro-skipper's silence-based intro-end adjustment.  Returns
+    *t* unchanged when no silence is found or *t* is at the file edges.
+    """
+    if t <= _REFINE_WINDOW_BEFORE or t >= duration - _REFINE_WINDOW_AFTER:
+        return t
+
+    result = _run_silencedetect(
+        filepath,
+        _REFINE_NOISE_DB,
+        _REFINE_MIN_SILENCE,
+        seek=t - _REFINE_WINDOW_BEFORE,
+        limit=_REFINE_WINDOW_BEFORE + _REFINE_WINDOW_AFTER,
+    )
+    if result is None:
+        return t
+    starts, _ends = result
+    if not starts:
+        return t
+
+    closest = min(starts, key=lambda start: abs(start - t))
+    if abs(closest - t) > _REFINE_WINDOW_BEFORE:
+        return t
+    return closest
+
+
+def _refine_results_with_silence(
+    results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]],
+    durations: Dict[str, float],
+) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
+    """Snap each result's boundaries to nearby silence via :func:`_snap_to_silence`.
+
+    Runs one file per thread since each ffmpeg call only scans a 7-second
+    window.  Falls back to the original (unrefined) tuple for a file when
+    snapping would break intro_start < intro_end < outro_start ordering.
+    """
+    refinable = [fp for fp in results if durations.get(fp) is not None]
+    if not refinable:
+        return results
+
+    def _refine_one(
+        fp: str,
+    ) -> Tuple[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
+        original = results[fp]
+        intro_start, intro_end, outro_start = original
+        duration = durations[fp]
+
+        new_intro_start = intro_start
+        if intro_start is not None and intro_start > 0.0:
+            new_intro_start = _snap_to_silence(fp, intro_start, duration)
+
+        new_intro_end = intro_end
+        if intro_end is not None:
+            new_intro_end = _snap_to_silence(fp, intro_end, duration)
+
+        new_outro_start = outro_start
+        if outro_start is not None:
+            new_outro_start = _snap_to_silence(fp, outro_start, duration)
+
+        if (
+            new_intro_start is not None
+            and new_intro_end is not None
+            and new_intro_start >= new_intro_end
+        ) or (
+            new_intro_end is not None
+            and new_outro_start is not None
+            and new_outro_start <= new_intro_end
+        ):
+            logger.debug(
+                "Silence-snap broke boundary ordering for %s; keeping original", fp
+            )
+            return fp, original
+
+        return fp, (new_intro_start, new_intro_end, new_outro_start)
+
+    refined: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = dict(results)
+    max_workers = min(len(refinable), max(1, (os.cpu_count() or 2) // 2))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for fp, updated in pool.map(_refine_one, refinable):
+            refined[fp] = updated
+
+    return refined
+
+
 def detect_by_fingerprinting(
     filepaths: List[str],
     durations: Dict[str, float],
     search_window: float = 300.0,
-    min_segment: float = 5.0,
-    max_segment: float = 180.0,
+    min_segment: float = 15.0,
+    max_segment: float = 120.0,
 ) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
     """Detect intro/outro boundaries for a batch of episode files.
 
@@ -1029,7 +1122,7 @@ def detect_by_fingerprinting(
                 filepaths, durations, search_window, min_segment, max_segment,
             )
             if result:
-                return result
+                return _refine_results_with_silence(result, durations)
             logger.info(
                 "Chromaprint detection found no boundaries; "
                 "falling back to chroma STFT fingerprinting"
@@ -1236,7 +1329,7 @@ def detect_by_fingerprinting(
     stats.candidate_files = len(filepaths)
     stats.elapsed_sec = time.monotonic() - start_time
     _set_last_fingerprint_stats(stats)
-    return results
+    return _refine_results_with_silence(results, durations)
 
 
 def _silence_cache_path(

@@ -338,11 +338,25 @@ def run(args: argparse.Namespace) -> int:
     durations: Dict[str, float] = {}
     dur_workers = min(len(video_files), max(1, (os.cpu_count() or 2)))
     duration_stage_start = time.monotonic()
+    failed_probes: List[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=dur_workers) as pool:
         future_to_fp = {pool.submit(get_duration, fp): fp for fp in video_files}
         for future in concurrent.futures.as_completed(future_to_fp):
             fp = future_to_fp[future]
             dur = future.result()
+            if dur is not None:
+                durations[fp] = dur
+            else:
+                failed_probes.append(fp)
+
+    if failed_probes:
+        app_log.info(
+            "Duration probe failed for %d file(s); retrying sequentially "
+            "(slow disk / cloud-synced files can stall the first read)…",
+            len(failed_probes),
+        )
+        for fp in failed_probes:
+            dur = get_duration(fp, timeout=120.0)
             if dur is not None:
                 durations[fp] = dur
             else:

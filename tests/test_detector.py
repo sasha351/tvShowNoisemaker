@@ -22,7 +22,9 @@ from tvshow_noisemaker.detector import (
     _pairwise_best_segments,
     _popcount32,
     _frame_similarity,
+    _refine_results_with_silence,
     _smooth,
+    _snap_to_silence,
     detect_by_silence,
     get_duration,
     resolve_boundaries,
@@ -287,6 +289,18 @@ def test_get_duration_exception():
     with patch("subprocess.run", side_effect=Exception("boom")):
         result = get_duration("/fake/ep01.mp4")
     assert result is None
+
+
+def test_get_duration_passes_custom_timeout():
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_ffprobe_stdout(1234.5),
+            stderr="",
+        )
+        get_duration("f.mkv", timeout=120.0)
+    _, kwargs = mock_run.call_args
+    assert kwargs["timeout"] == 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -744,3 +758,98 @@ def test_detect_by_chromaprint_parallel_extraction_deterministic_order():
 
     assert max_active > 1
     assert list(results.keys()) == filepaths
+
+
+# ---------------------------------------------------------------------------
+# _snap_to_silence / _refine_results_with_silence
+# ---------------------------------------------------------------------------
+
+
+def test_snap_to_silence_snaps_to_nearest_start():
+    with patch(
+        "tvshow_noisemaker.detector._run_silencedetect",
+        return_value=([95.5, 99.8], [96.0, 100.2]),
+    ):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0) == 99.8
+
+
+def test_snap_to_silence_returns_t_when_silencedetect_fails():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=None):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0) == 100.0
+
+
+def test_snap_to_silence_returns_t_when_no_silence_found():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([], [])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0) == 100.0
+
+
+def test_snap_to_silence_returns_t_near_file_start():
+    with patch("tvshow_noisemaker.detector._run_silencedetect") as mock_sil:
+        assert _snap_to_silence("f.mkv", 2.0, 1200.0) == 2.0
+    mock_sil.assert_not_called()
+
+
+def test_snap_to_silence_returns_t_near_file_end():
+    with patch("tvshow_noisemaker.detector._run_silencedetect") as mock_sil:
+        assert _snap_to_silence("f.mkv", 1199.0, 1200.0) == 1199.0
+    mock_sil.assert_not_called()
+
+
+def test_refine_results_with_silence_keeps_original_on_bad_ordering():
+    """If snapping would push intro_start past intro_end, keep the original tuple."""
+    results = {"/show/ep01.mp4": (10.0, 30.0, 2550.0)}
+    durations = {"/show/ep01.mp4": 2700.0}
+
+    def _fake_snap(_fp, t, _duration):
+        if t == 10.0:
+            return 35.0  # now >= intro_end, breaks ordering
+        return t
+
+    with patch(
+        "tvshow_noisemaker.detector._snap_to_silence", side_effect=_fake_snap,
+    ):
+        refined = _refine_results_with_silence(results, durations)
+
+    assert refined["/show/ep01.mp4"] == (10.0, 30.0, 2550.0)
+
+
+def test_refine_results_with_silence_refines_normal_tuple():
+    results = {
+        "/show/ep01.mp4": (10.0, 30.0, 2550.0),
+        "/show/ep02.mp4": (12.0, 32.0, 2560.0),
+    }
+    durations = {
+        "/show/ep01.mp4": 2700.0,
+        "/show/ep02.mp4": 2700.0,
+        # ep03 has no duration and no entry in results anyway.
+    }
+
+    shifts = {10.0: 9.5, 30.0: 29.8, 2550.0: 2549.0, 12.0: 11.5, 32.0: 31.8, 2560.0: 2559.0}
+
+    def _fake_snap(_fp, t, _duration):
+        return shifts.get(t, t)
+
+    with patch(
+        "tvshow_noisemaker.detector._snap_to_silence", side_effect=_fake_snap,
+    ):
+        refined = _refine_results_with_silence(results, durations)
+
+    assert refined["/show/ep01.mp4"] == (9.5, 29.8, 2549.0)
+    assert refined["/show/ep02.mp4"] == (11.5, 31.8, 2559.0)
+
+
+def test_refine_results_with_silence_passes_through_missing_duration():
+    results = {
+        "/show/ep01.mp4": (10.0, 30.0, 2550.0),
+        "/show/ep02.mp4": (12.0, 32.0, 2560.0),
+    }
+    durations = {"/show/ep01.mp4": 2700.0}  # ep02 missing
+
+    with patch(
+        "tvshow_noisemaker.detector._snap_to_silence",
+        side_effect=lambda _fp, t, _duration: t + 0.1,
+    ):
+        refined = _refine_results_with_silence(results, durations)
+
+    assert refined["/show/ep01.mp4"] == (10.1, 30.1, 2550.1)
+    assert refined["/show/ep02.mp4"] == (12.0, 32.0, 2560.0)
