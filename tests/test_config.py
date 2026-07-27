@@ -169,3 +169,45 @@ def test_build_config_file_fills_missing():
     cfg = build_config(args, file_data)
     assert cfg.mp3_bitrate == 128
     assert cfg.intro_duration == 45.0
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg_threads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [0, 1, 4])
+def test_load_config_valid_ffmpeg_threads(tmp_path, value):
+    cfg_file = tmp_path / "cfg.json"
+    cfg_file.write_text(json.dumps({"ffmpeg_threads": value}), encoding="utf-8")
+    assert load_config(str(cfg_file))["ffmpeg_threads"] == value
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "two", True])
+def test_load_config_invalid_ffmpeg_threads(tmp_path, bad):
+    cfg_file = tmp_path / "cfg.json"
+    cfg_file.write_text(json.dumps({"ffmpeg_threads": bad}), encoding="utf-8")
+    with pytest.raises(ValueError, match="non-negative integer"):
+        load_config(str(cfg_file))
+
+
+def test_build_config_ffmpeg_threads_defaults_to_none():
+    """Unset means 'auto-divide at the call site', not a concrete number."""
+    cfg = build_config(_FakeArgs(ffmpeg_threads=None), {})
+    assert cfg.ffmpeg_threads is None
+
+
+def test_build_config_ffmpeg_threads_cli_overrides_file():
+    cfg = build_config(_FakeArgs(ffmpeg_threads=2), {"ffmpeg_threads": 8})
+    assert cfg.ffmpeg_threads == 2
+
+
+def test_build_config_ffmpeg_threads_from_file():
+    cfg = build_config(_FakeArgs(ffmpeg_threads=None), {"ffmpeg_threads": 8})
+    assert cfg.ffmpeg_threads == 8
+
+
+def test_build_config_ffmpeg_threads_zero_survives_falsy_check():
+    """0 is meaningful (ffmpeg auto) and must not be coerced back to None."""
+    cfg = build_config(_FakeArgs(ffmpeg_threads=0), {"ffmpeg_threads": 8})
+    assert cfg.ffmpeg_threads == 0

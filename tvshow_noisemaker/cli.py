@@ -240,7 +240,20 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Number of parallel ffmpeg workers for file processing "
-            "(default: half of CPU count).  Use 1 for sequential processing."
+            "(default: CPU count).  Use 1 for sequential processing."
+        ),
+    )
+
+    parser.add_argument(
+        "--ffmpeg-threads",
+        dest="ffmpeg_threads",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Threads per ffmpeg process (default: CPU count divided by the "
+            "number of encode workers, so the pool as a whole stays near one "
+            "thread per core).  Use 0 for ffmpeg's own auto-threading."
         ),
     )
 
@@ -530,12 +543,14 @@ def run(args: argparse.Namespace) -> int:
     # ── Phase 2: process files in parallel ──────────────────────────────────
     max_workers = cfg.workers or _default_encode_workers()
     max_workers = min(max_workers, len(jobs)) if jobs else 1
+    ffmpeg_threads = _resolve_ffmpeg_threads(cfg.ffmpeg_threads, max_workers)
     progress_lock = threading.Lock()
     done_count = len(skipped)  # skipped files count as "done" for progress
 
     con.info(
-        "Starting conversion  (%d files, %d to encode, %d workers, output → %s)",
-        total_count, len(jobs), max_workers, output_dir,
+        "Starting conversion  (%d files, %d to encode, %d workers, "
+        "%d threads/ffmpeg, output → %s)",
+        total_count, len(jobs), max_workers, ffmpeg_threads, output_dir,
     )
     _print_progress_bar(done_count, total_count, 0, len(skipped), 0, batch_start)
 
@@ -554,6 +569,7 @@ def run(args: argparse.Namespace) -> int:
             mp3_bitrate=cfg.mp3_bitrate,
             output_format=cfg.output_format,
             metadata=metadata,
+            ffmpeg_threads=ffmpeg_threads,
         )
         file_elapsed = time.monotonic() - file_start
         out_size = _file_size(output_path)
@@ -725,6 +741,24 @@ def _default_encode_workers() -> int:
     audio-only encodes scale close to linearly up to the core count.
     """
     return max(1, os.cpu_count() or 2)
+
+
+def _resolve_ffmpeg_threads(
+    configured: Optional[int], max_workers: int
+) -> Optional[int]:
+    """Thread budget for each ffmpeg process in the encode pool.
+
+    An explicit *configured* value (CLI flag or config file) always wins;
+    ``0`` is passed through as ffmpeg's own auto-threading.
+
+    Otherwise divide the cores across the pool.  Left to itself, ffmpeg gives
+    each process roughly one thread per core, so ``max_workers`` concurrent
+    encodes demand ``workers × cores`` threads and spend the surplus in
+    scheduler contention rather than on work.
+    """
+    if configured is not None:
+        return configured
+    return max(1, (os.cpu_count() or 2) // max(1, max_workers))
 
 
 def main() -> None:

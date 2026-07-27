@@ -10,7 +10,13 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from tvshow_noisemaker.cli import run, _build_parser, _setup_logging, _default_encode_workers
+from tvshow_noisemaker.cli import (
+    run,
+    _build_parser,
+    _setup_logging,
+    _default_encode_workers,
+    _resolve_ffmpeg_threads,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +547,31 @@ def test_default_encode_workers_uses_all_cores():
 def test_default_encode_workers_unknown_cpu_count():
     with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=None):
         assert _default_encode_workers() == 2
+
+
+# ---------------------------------------------------------------------------
+# _resolve_ffmpeg_threads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("workers, expected", [
+    (1, 8),   # one encode at a time → it may use the whole machine
+    (2, 4),
+    (8, 1),   # full-width pool → one thread each, ~one thread per core overall
+    (16, 1),  # more workers than cores → never drop below 1
+])
+def test_resolve_ffmpeg_threads_divides_cores_across_pool(workers, expected):
+    with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=8):
+        assert _resolve_ffmpeg_threads(None, workers) == expected
+
+
+@pytest.mark.parametrize("configured", [0, 1, 6])
+def test_resolve_ffmpeg_threads_explicit_value_wins(configured):
+    """CLI/config is a hard override, including 0 (ffmpeg auto)."""
+    with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=8):
+        assert _resolve_ffmpeg_threads(configured, 4) == configured
+
+
+def test_resolve_ffmpeg_threads_unknown_cpu_count():
+    with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=None):
+        assert _resolve_ffmpeg_threads(None, 1) == 2

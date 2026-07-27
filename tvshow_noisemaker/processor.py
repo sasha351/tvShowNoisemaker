@@ -36,6 +36,19 @@ def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
     return args
 
 
+def _thread_args(ffmpeg_threads: Optional[int]) -> list[str]:
+    """Return ``-threads N``, or nothing when *ffmpeg_threads* is ``None``.
+
+    ``-threads`` is a per-stream codec option, so its meaning depends on where
+    it sits in the command: before ``-i`` it caps the decoder, after the codec
+    args it caps the encoder.  Callers emit it in both places.  ``0`` is
+    ffmpeg's own "auto" and is passed through explicitly.
+    """
+    if ffmpeg_threads is None:
+        return []
+    return ["-threads", str(ffmpeg_threads)]
+
+
 def process_file(
     input_path: str,
     output_path: str,
@@ -45,6 +58,7 @@ def process_file(
     mp3_bitrate: int = 256,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    ffmpeg_threads: Optional[int] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -69,6 +83,12 @@ def process_file(
         One of "mp3", "m4a", "flac", "wav".
     metadata:
         Optional output tags to write into the MP3 with ffmpeg.
+    ffmpeg_threads:
+        Thread budget for this ffmpeg process (decoder, encoder, and — on the
+        concat path — the filtergraph).  ``None`` leaves ffmpeg's defaults
+        alone, which means one thread per core *per process*; when several
+        encodes run concurrently that oversubscribes the machine.  ``0`` is
+        ffmpeg's explicit "auto".
 
     Raises
     ------
@@ -92,13 +112,13 @@ def process_file(
         cmd = _build_concat_cmd(
             input_path, output_path,
             intro_start, intro_end, outro_start,
-            mp3_bitrate, output_format, metadata,
+            mp3_bitrate, output_format, metadata, ffmpeg_threads,
         )
     else:
         cmd = _build_simple_cmd(
             input_path, output_path,
             intro_end, outro_start,
-            mp3_bitrate, output_format, metadata,
+            mp3_bitrate, output_format, metadata, ffmpeg_threads,
         )
 
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
@@ -136,12 +156,14 @@ def _build_simple_cmd(
     mp3_bitrate: int,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    ffmpeg_threads: Optional[int] = None,
 ) -> list:
     """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
     duration = outro_start - intro_end
     cmd = [
         "ffmpeg",
         "-y",
+        *_thread_args(ffmpeg_threads),
         "-ss", str(intro_end),
         "-t", str(duration),
         "-i", input_path,
@@ -149,6 +171,7 @@ def _build_simple_cmd(
         "-vn",
         *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
+        *_thread_args(ffmpeg_threads),
     ]
     cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)
@@ -164,6 +187,7 @@ def _build_concat_cmd(
     mp3_bitrate: int,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    ffmpeg_threads: Optional[int] = None,
 ) -> list:
     """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
     filter_complex = (
@@ -171,15 +195,24 @@ def _build_concat_cmd(
         f"[0:a]atrim=start={intro_end}:end={outro_start},asetpts=PTS-STARTPTS[post];"
         f"[pre][post]concat=n=2:v=0:a=1[out]"
     )
+    # The filtergraph otherwise defaults to one thread per core, which is the
+    # bulk of the oversubscription on this path.
+    filter_thread_args = (
+        [] if ffmpeg_threads is None
+        else ["-filter_complex_threads", str(ffmpeg_threads)]
+    )
     cmd = [
         "ffmpeg",
         "-y",
+        *_thread_args(ffmpeg_threads),
         "-i", input_path,
         "-filter_complex", filter_complex,
+        *filter_thread_args,
         "-map", "[out]",
         "-vn",
         *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
+        *_thread_args(ffmpeg_threads),
     ]
     cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)

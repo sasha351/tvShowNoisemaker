@@ -236,3 +236,61 @@ def test_process_file_simple_when_no_cold_open(tmp_path):
     assert "-filter_complex" not in cmd
     assert "-ss" in cmd
     assert "30.0" in cmd
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg thread policy
+# ---------------------------------------------------------------------------
+
+
+def _run_and_capture_cmd(tmp_path, **kwargs) -> list:
+    """Invoke process_file with mocked ffmpeg and return the command it built."""
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(
+            input_path="/input/ep01.mp4",
+            output_path=str(tmp_path / "ep01.mp3"),
+            intro_end=165.0,
+            outro_start=2550.0,
+            **kwargs,
+        )
+    return mock_run.call_args[0][0]
+
+
+@pytest.mark.parametrize("intro_start", [0.0, 120.0], ids=["simple", "concat"])
+def test_ffmpeg_threads_omitted_by_default(tmp_path, intro_start):
+    """Default (None) leaves ffmpeg's own threading untouched — the A/B baseline."""
+    cmd = _run_and_capture_cmd(tmp_path, intro_start=intro_start)
+    assert "-threads" not in cmd
+    assert "-filter_complex_threads" not in cmd
+
+
+def test_ffmpeg_threads_simple_path_caps_decoder_and_encoder(tmp_path):
+    """-threads is emitted both before -i (decoder) and after the codec args."""
+    cmd = _run_and_capture_cmd(tmp_path, intro_start=0.0, ffmpeg_threads=2)
+
+    assert cmd.count("-threads") == 2
+    for idx in [i for i, arg in enumerate(cmd) if arg == "-threads"]:
+        assert cmd[idx + 1] == "2"
+
+    # One before -i (decoder side), one after (encoder side).
+    input_idx = cmd.index("-i")
+    thread_positions = [i for i, arg in enumerate(cmd) if arg == "-threads"]
+    assert thread_positions[0] < input_idx < thread_positions[1]
+
+
+def test_ffmpeg_threads_concat_path_also_caps_filtergraph(tmp_path):
+    """The concat filtergraph otherwise defaults to one thread per core."""
+    cmd = _run_and_capture_cmd(tmp_path, intro_start=120.0, ffmpeg_threads=2)
+
+    assert "-filter_complex" in cmd
+    assert "-filter_complex_threads" in cmd
+    assert cmd[cmd.index("-filter_complex_threads") + 1] == "2"
+    assert cmd.count("-threads") == 2
+
+
+def test_ffmpeg_threads_zero_is_emitted_not_omitted(tmp_path):
+    """0 means ffmpeg auto and must be distinguishable from None."""
+    cmd = _run_and_capture_cmd(tmp_path, intro_start=0.0, ffmpeg_threads=0)
+    assert "-threads" in cmd
+    assert cmd[cmd.index("-threads") + 1] == "0"

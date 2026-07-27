@@ -124,7 +124,8 @@ This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight
 | `--input-dir`, `-i` | required | Input video directory |
 | `--output-dir`, `-o` | required | Output MP3 directory |
 | `--config`, `-c` | none | JSON config file |
-| `--workers`, `-w` | half CPU count | Parallel encode workers |
+| `--workers`, `-w` | CPU count | Parallel encode workers |
+| `--ffmpeg-threads` | CPU count ÷ workers | Threads per ffmpeg process (`0` = ffmpeg auto) |
 | `--mp3-bitrate` | 256 | MP3 bitrate (kbps) |
 | `--fingerprint` / `--no-fingerprint` | on | Enable/disable fingerprinting |
 | `--fingerprint-search-window` | 300 | Search window from start/end |
@@ -146,6 +147,7 @@ Example:
     "silence_db": -40.0,
     "min_silence_len": 0.5,
     "fingerprint_search_window": 300.0,
+    "ffmpeg_threads": 1,
     "timestamps": {
         "s01e01.mp4": { "intro_end": 88.5, "outro_start": 2610.0 }
     }
@@ -170,6 +172,27 @@ The run summary includes:
 - fingerprint cache hits/misses
 - stage timings (`probe`, `fingerprint`, `boundaries`, `encode`)
 - throughput and total runtime
+
+### Thread policy
+
+Warm-cache runs are encode-bound. Left alone, ffmpeg gives each process about one
+thread per core, so `--workers N` asks the machine for roughly `N × cores` threads and
+spends the surplus on scheduler contention rather than work. By default the encode pool
+therefore divides the cores across its workers (`--ffmpeg-threads` = CPU count ÷
+workers, minimum 1), keeping the pool near one thread per core overall.
+
+Both settings are hard overrides, so you can A/B them:
+
+```bash
+# restore the old behaviour (ffmpeg decides per process)
+tvshow-noisemaker -i ./eps -o ./out --workers 8 --ffmpeg-threads 0
+
+# compare CPU efficiency between policies
+/usr/bin/time -l tvshow-noisemaker -i ./eps -o ./out --workers 8
+```
+
+Compare `(user + sys) / real` across runs — lower means less time lost to contention at
+the same wall time. Thread count does not affect output bytes.
 
 ## Output
 

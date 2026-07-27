@@ -12,7 +12,8 @@ Supports a JSON config file with the following optional keys:
         "output_format": "mp3",
         "silence_db": -40.0,
         "min_silence_len": 0.5,
-        "fingerprint_search_window": 300.0
+        "fingerprint_search_window": 300.0,
+        "ffmpeg_threads": 1
     }
 
 CLI flags always override config file values.
@@ -38,6 +39,7 @@ _VALID_KEYS = {
     "silence_db",
     "min_silence_len",
     "fingerprint_search_window",
+    "ffmpeg_threads",
 }
 
 VALID_OUTPUT_FORMATS = {"mp3", "m4a", "flac", "wav"}
@@ -59,6 +61,8 @@ class Config:
     use_fingerprinting: bool = True
     log_file: Optional[str] = None
     workers: Optional[int] = None
+    # Threads per ffmpeg process.  None = auto-divide across encode workers.
+    ffmpeg_threads: Optional[int] = None
 
 
 def load_config(config_path: Optional[str]) -> Dict[str, Any]:
@@ -104,6 +108,16 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
         if not isinstance(val, int) or val <= 0:
             raise ValueError(f"Config key 'mp3_bitrate' must be a positive integer, got {val!r}")
         validated["mp3_bitrate"] = val
+
+    if "ffmpeg_threads" in raw:
+        val = raw["ffmpeg_threads"]
+        # bool is a subclass of int; `true` would silently mean 1 thread.
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+            raise ValueError(
+                f"Config key 'ffmpeg_threads' must be a non-negative integer "
+                f"(0 = ffmpeg auto), got {val!r}"
+            )
+        validated["ffmpeg_threads"] = val
 
     if "output_format" in raw:
         val = raw["output_format"]
@@ -171,6 +185,13 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
     workers_raw = getattr(args, "workers", None)
     workers = int(workers_raw) if workers_raw is not None else None
 
+    ffmpeg_threads_raw = _pick(
+        getattr(args, "ffmpeg_threads", None), "ffmpeg_threads", None
+    )
+    ffmpeg_threads = (
+        int(ffmpeg_threads_raw) if ffmpeg_threads_raw is not None else None
+    )
+
     return Config(
         intro_duration=intro_duration,
         outro_duration=outro_duration,
@@ -183,4 +204,5 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         use_fingerprinting=getattr(args, "fingerprint", True),
         log_file=getattr(args, "log_file", None),
         workers=workers,
+        ffmpeg_threads=ffmpeg_threads,
     )
