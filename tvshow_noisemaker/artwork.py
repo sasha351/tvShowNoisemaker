@@ -14,7 +14,9 @@ and must never fail a conversion.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -67,3 +69,50 @@ def _find_sidecar(input_dir: str) -> Optional[Path]:
     if found:
         return found
     return _first_existing(show_dir, _SIDECAR_NAMES)
+
+
+def _find_embedded_cover_index(video_path: str) -> Optional[int]:
+    """Return the stream index of a cover image inside *video_path*.
+
+    Matroska attachments surface as video streams, so the primary video track
+    has to be told apart from the cover.  On the observed library the cover
+    carries ``filename``/``mimetype`` tags and no ``attached_pic`` disposition,
+    and its index varies between files -- hence the probe.
+    """
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v",
+        "-show_entries", "stream=index,codec_name,disposition",
+        "-show_entries", "stream_tags=filename,mimetype",
+        "-of", "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("Artwork: ffprobe failed on %s: %s", video_path, exc)
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "Artwork: ffprobe exited %d on %s", result.returncode, video_path
+        )
+        return None
+
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except (ValueError, AttributeError) as exc:
+        logger.warning("Artwork: could not parse ffprobe output: %s", exc)
+        return None
+
+    # ffprobe emits streams in index order, so the first match is the lowest.
+    for stream in streams:
+        if stream.get("codec_name") not in _COVER_CODECS:
+            continue
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        if tags.get("filename") or tags.get("mimetype") or disposition.get("attached_pic"):
+            return stream.get("index")
+    return None
