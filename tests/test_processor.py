@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tvshow_noisemaker.processor import build_output_path, process_file
+from tvshow_noisemaker.processor import (
+    _build_artwork_args,
+    build_output_path,
+    process_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -236,3 +240,109 @@ def test_process_file_simple_when_no_cold_open(tmp_path):
     assert "-filter_complex" not in cmd
     assert "-ss" in cmd
     assert "30.0" in cmd
+
+
+# ---------------------------------------------------------------------------
+# cover artwork
+# ---------------------------------------------------------------------------
+
+
+def _run_process_file(tmp_path, **kwargs):
+    """Call process_file with a mocked ffmpeg and return the command list."""
+    params = {
+        "input_path": "/input/ep01.mp4",
+        "output_path": str(tmp_path / "ep01.mp3"),
+        "intro_end": 30.0,
+        "outro_start": 2550.0,
+    }
+    params.update(kwargs)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        process_file(**params)
+    return mock_run.call_args[0][0]
+
+
+def test_simple_cmd_has_no_vn_flag(tmp_path):
+    """-vn silently discards mapped cover art, so it must never be emitted."""
+    cmd = _run_process_file(tmp_path)
+    assert "-vn" not in cmd
+
+
+def test_concat_cmd_has_no_vn_flag(tmp_path):
+    cmd = _run_process_file(tmp_path, intro_start=165.0, intro_end=200.0)
+    assert "-filter_complex" in cmd
+    assert "-vn" not in cmd
+
+
+def test_simple_cmd_embeds_artwork(tmp_path):
+    cmd = _run_process_file(tmp_path, artwork_path="/work/cover.jpg")
+    assert "/work/cover.jpg" in cmd
+    idx = cmd.index("-map", cmd.index("-ac"))
+    assert cmd[idx:idx + 2] == ["-map", "1:v"]
+    assert "-disposition:v" in cmd
+    assert "attached_pic" in cmd
+    c_idx = cmd.index("-c:v")
+    assert cmd[c_idx:c_idx + 2] == ["-c:v", "copy"]
+
+
+def test_concat_cmd_embeds_artwork(tmp_path):
+    cmd = _run_process_file(
+        tmp_path, intro_start=165.0, intro_end=200.0, artwork_path="/work/cover.jpg"
+    )
+    assert "-filter_complex" in cmd
+    assert "/work/cover.jpg" in cmd
+    assert "1:v" in cmd
+    assert "attached_pic" in cmd
+
+
+def test_artwork_input_comes_after_source_input(tmp_path):
+    """-ss/-t precede input 0 and must not apply to the cover image."""
+    cmd = _run_process_file(tmp_path, artwork_path="/work/cover.jpg")
+    assert cmd.index("/input/ep01.mp4") < cmd.index("/work/cover.jpg")
+
+
+def test_no_artwork_args_when_path_is_none(tmp_path):
+    cmd = _run_process_file(tmp_path)
+    assert "1:v" not in cmd
+    assert "-disposition:v" not in cmd
+
+
+def test_artwork_skipped_for_wav(tmp_path):
+    """The wav muxer rejects video streams; mapping an image breaks the encode."""
+    cmd = _run_process_file(
+        tmp_path,
+        output_path=str(tmp_path / "ep01.wav"),
+        output_format="wav",
+        artwork_path="/work/cover.jpg",
+    )
+    assert "/work/cover.jpg" not in cmd
+    assert "1:v" not in cmd
+    assert "-disposition:v" not in cmd
+
+
+@pytest.mark.parametrize("fmt", ["mp3", "m4a", "flac"])
+def test_artwork_embedded_for_non_wav_formats(tmp_path, fmt):
+    cmd = _run_process_file(
+        tmp_path,
+        output_path=str(tmp_path / f"ep01.{fmt}"),
+        output_format=fmt,
+        artwork_path="/work/cover.jpg",
+    )
+    assert "/work/cover.jpg" in cmd
+    assert "1:v" in cmd
+
+
+def test_build_artwork_args_returns_empty_pairs_for_wav():
+    assert _build_artwork_args("/work/cover.jpg", "wav") == ([], [])
+
+
+def test_build_artwork_args_returns_empty_pairs_for_none():
+    assert _build_artwork_args(None, "mp3") == ([], [])
+
+
+def test_build_artwork_args_populated_for_mp3():
+    inputs, outputs = _build_artwork_args("/work/cover.jpg", "mp3")
+    assert inputs == ["-i", "/work/cover.jpg"]
+    assert outputs == [
+        "-map", "1:v", "-c:v", "copy", "-disposition:v", "attached_pic",
+    ]

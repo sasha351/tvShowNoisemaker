@@ -45,6 +45,7 @@ def process_file(
     mp3_bitrate: int = 256,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    artwork_path: Optional[str] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -69,6 +70,9 @@ def process_file(
         One of "mp3", "m4a", "flac", "wav".
     metadata:
         Optional output tags to write into the MP3 with ffmpeg.
+    artwork_path:
+        Optional path to a cover image to embed.  Ignored for wav output,
+        whose muxer rejects video streams.
 
     Raises
     ------
@@ -92,13 +96,13 @@ def process_file(
         cmd = _build_concat_cmd(
             input_path, output_path,
             intro_start, intro_end, outro_start,
-            mp3_bitrate, output_format, metadata,
+            mp3_bitrate, output_format, metadata, artwork_path,
         )
     else:
         cmd = _build_simple_cmd(
             input_path, output_path,
             intro_end, outro_start,
-            mp3_bitrate, output_format, metadata,
+            mp3_bitrate, output_format, metadata, artwork_path,
         )
 
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
@@ -136,19 +140,22 @@ def _build_simple_cmd(
     mp3_bitrate: int,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    artwork_path: Optional[str] = None,
 ) -> list:
     """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
     duration = outro_start - intro_end
+    art_in, art_out = _build_artwork_args(artwork_path, output_format)
     cmd = [
         "ffmpeg",
         "-y",
         "-ss", str(intro_end),
         "-t", str(duration),
         "-i", input_path,
+        *art_in,
         "-map", "0:a:0",
-        "-vn",
         *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
+        *art_out,
     ]
     cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)
@@ -164,6 +171,7 @@ def _build_concat_cmd(
     mp3_bitrate: int,
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
+    artwork_path: Optional[str] = None,
 ) -> list:
     """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
     filter_complex = (
@@ -171,15 +179,17 @@ def _build_concat_cmd(
         f"[0:a]atrim=start={intro_end}:end={outro_start},asetpts=PTS-STARTPTS[post];"
         f"[pre][post]concat=n=2:v=0:a=1[out]"
     )
+    art_in, art_out = _build_artwork_args(artwork_path, output_format)
     cmd = [
         "ffmpeg",
         "-y",
         "-i", input_path,
+        *art_in,
         "-filter_complex", filter_complex,
         "-map", "[out]",
-        "-vn",
         *_codec_args(output_format, mp3_bitrate),
         "-ac", "2",
+        *art_out,
     ]
     cmd.extend(_build_metadata_args(metadata, output_format))
     cmd.append(output_path)
@@ -198,6 +208,22 @@ def _build_metadata_args(
         if value:
             args.extend(["-metadata", f"{key}={value}"])
     return args
+
+
+def _build_artwork_args(
+    artwork_path: Optional[str], output_format: str
+) -> tuple[list[str], list[str]]:
+    """Return ``(input_args, output_args)`` for embedding cover art.
+
+    WAV gets nothing: the wav muxer rejects video streams outright, so mapping
+    an image into it fails the encode rather than being ignored.
+    """
+    if not artwork_path or output_format == "wav":
+        return [], []
+    return (
+        ["-i", artwork_path],
+        ["-map", "1:v", "-c:v", "copy", "-disposition:v", "attached_pic"],
+    )
 
 
 def build_output_path(input_path: str, output_dir: str, output_format: str = "mp3") -> str:
