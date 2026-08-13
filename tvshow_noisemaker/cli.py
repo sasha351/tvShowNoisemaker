@@ -24,11 +24,13 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from tvshow_noisemaker.artwork import resolve_artwork
 from tvshow_noisemaker.config import VALID_OUTPUT_FORMATS, build_config, load_config
 from tvshow_noisemaker.detector import (
     detect_by_fingerprinting,
@@ -528,6 +530,19 @@ def run(args: argparse.Namespace) -> int:
         jobs.append((filepath, basename, intro_start, intro_end, outro_start, content_duration, trimmed))
 
     # ── Phase 2: process files in parallel ──────────────────────────────────
+    # Resolve cover art once: every episode in a season shares an album, and
+    # probing each file costs seconds.  wav is skipped -- its muxer rejects
+    # video streams outright.
+    artwork_path: Optional[str] = None
+    artwork_dir = tempfile.mkdtemp(prefix="tvshow-art-")
+    if jobs and cfg.output_format != "wav":
+        resolved = resolve_artwork(str(input_dir), jobs[0][0], jobs[0][3], artwork_dir)
+        if resolved is not None:
+            artwork_path, artwork_source = resolved
+            con.info("Artwork: %s", artwork_source)
+        else:
+            con.info("Artwork: none found — encoding without cover art")
+
     max_workers = cfg.workers or _default_encode_workers()
     max_workers = min(max_workers, len(jobs)) if jobs else 1
     progress_lock = threading.Lock()
@@ -554,6 +569,7 @@ def run(args: argparse.Namespace) -> int:
             mp3_bitrate=cfg.mp3_bitrate,
             output_format=cfg.output_format,
             metadata=metadata,
+            artwork_path=artwork_path,
         )
         file_elapsed = time.monotonic() - file_start
         out_size = _file_size(output_path)
@@ -599,6 +615,11 @@ def run(args: argparse.Namespace) -> int:
                     batch_start,
                 )
     encode_sec = time.monotonic() - encode_stage_start
+
+    # ponytail: cleaned up after the pool rather than via try/finally, which
+    # would mean re-indenting the whole encode phase.  A crash leaks one 26 KB
+    # JPEG into the OS temp dir, which the OS reclaims.
+    shutil.rmtree(artwork_dir, ignore_errors=True)
 
     # Finish progress line before summary logging
     sys.stdout.write("\n")

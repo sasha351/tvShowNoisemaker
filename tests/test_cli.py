@@ -541,3 +541,91 @@ def test_default_encode_workers_uses_all_cores():
 def test_default_encode_workers_unknown_cpu_count():
     with patch("tvshow_noisemaker.cli.os.cpu_count", return_value=None):
         assert _default_encode_workers() == 2
+
+
+# ---------------------------------------------------------------------------
+# cover artwork wiring
+# ---------------------------------------------------------------------------
+
+
+def _artwork_run(tmp_path, resolved, episode_count=3, output_format=None):
+    """Run a conversion with artwork resolution patched. Returns (mocks, exit_code)."""
+    show_dir = tmp_path / "Family Guy" / "Season 2"
+    show_dir.mkdir(parents=True)
+    for n in range(1, episode_count + 1):
+        (show_dir / f"Family.Guy.S02E{n:02d}.Episode.mp4").touch()
+
+    args = _make_args(
+        input_dir=str(show_dir),
+        output_dir=str(tmp_path / "out"),
+        output_format=output_format,
+        fingerprint=False,
+    )
+
+    with (
+        patch("tvshow_noisemaker.cli.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.cli.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.cli.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.cli.resolve_artwork", return_value=resolved) as mock_art,
+        patch("tvshow_noisemaker.cli.process_file") as mock_proc,
+    ):
+        exit_code = run(args)
+    return mock_art, mock_proc, exit_code
+
+
+def test_run_resolves_artwork_once_for_the_whole_run(tmp_path):
+    """Probing every episode costs seconds each; one cover serves the season."""
+    mock_art, mock_proc, exit_code = _artwork_run(
+        tmp_path, ("/work/cover.jpg", "sidecar image (poster.jpg)")
+    )
+    assert exit_code == 0
+    mock_art.assert_called_once()
+    assert mock_proc.call_count == 3
+
+
+def test_run_passes_artwork_path_to_every_encode(tmp_path):
+    _, mock_proc, _ = _artwork_run(
+        tmp_path, ("/work/cover.jpg", "sidecar image (poster.jpg)")
+    )
+    for _, kwargs in mock_proc.call_args_list:
+        assert kwargs["artwork_path"] == "/work/cover.jpg"
+
+
+def test_run_resolves_artwork_from_first_job_path_and_intro_end(tmp_path):
+    mock_art, _, _ = _artwork_run(
+        tmp_path, ("/work/cover.jpg", "embedded cover (stream 4)")
+    )
+    input_dir_arg, sample_video, intro_end, workdir = mock_art.call_args[0]
+    assert sample_video.endswith(".mp4")
+    assert intro_end == 30.0
+    assert Path(input_dir_arg).name == "Season 2"
+    assert isinstance(workdir, str)
+
+
+def test_run_skips_artwork_entirely_for_wav(tmp_path):
+    """The wav muxer rejects video streams, so resolving one is wasted work."""
+    mock_art, mock_proc, exit_code = _artwork_run(
+        tmp_path, ("/work/cover.jpg", "sidecar image (poster.jpg)"),
+        output_format="wav",
+    )
+    assert exit_code == 0
+    mock_art.assert_not_called()
+    for _, kwargs in mock_proc.call_args_list:
+        assert kwargs["artwork_path"] is None
+
+
+def test_run_continues_when_no_artwork_is_found(tmp_path):
+    mock_art, mock_proc, exit_code = _artwork_run(tmp_path, None)
+    assert exit_code == 0
+    mock_art.assert_called_once()
+    assert mock_proc.call_count == 3
+    for _, kwargs in mock_proc.call_args_list:
+        assert kwargs["artwork_path"] is None
+
+
+def test_run_removes_the_artwork_temp_dir(tmp_path):
+    mock_art, _, _ = _artwork_run(
+        tmp_path, ("/work/cover.jpg", "sidecar image (poster.jpg)")
+    )
+    workdir = mock_art.call_args[0][3]
+    assert not Path(workdir).exists()
