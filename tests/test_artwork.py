@@ -359,3 +359,23 @@ def test_resolve_returns_none_when_every_tier_fails(tmp_path):
     with patch("tvshow_noisemaker.artwork._normalize", return_value=False), \
          patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=None):
         assert resolve_artwork(str(season), "/v.mkv", 30.0, str(work)) is None
+
+
+# ---------------------------------------------------------------------------
+# UnicodeDecodeError never escapes (artwork must never fail a conversion)
+# ---------------------------------------------------------------------------
+
+
+def test_embedded_cover_none_on_decode_error():
+    """A locale that can't decode ffprobe's stderr must not crash the run."""
+    exc = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    with patch("subprocess.run", side_effect=exc):
+        assert _find_embedded_cover_index("/v.mkv") is None
+
+
+def test_normalize_false_on_decode_error(tmp_path):
+    """A locale that can't decode ffmpeg's stderr must not crash the run."""
+    dest = tmp_path / "cover.jpg"
+    exc = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    with patch("subprocess.run", side_effect=exc):
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False

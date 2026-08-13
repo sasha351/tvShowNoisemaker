@@ -89,9 +89,13 @@ def _find_embedded_cover_index(video_path: str) -> Optional[int]:
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_FFMPEG_TIMEOUT,
         )
-    except (subprocess.SubprocessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         logger.warning("Artwork: ffprobe failed on %s: %s", video_path, exc)
         return None
 
@@ -137,9 +141,13 @@ def _normalize(input_args: list[str], dest: str) -> bool:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_FFMPEG_TIMEOUT,
         )
-    except (subprocess.SubprocessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         logger.warning("Artwork: ffmpeg failed: %s", exc)
         return False
 
