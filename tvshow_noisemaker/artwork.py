@@ -82,8 +82,8 @@ def _find_embedded_cover_index(video_path: str) -> Optional[int]:
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v",
-        "-show_entries", "stream=index,codec_name,disposition",
-        "-show_entries", "stream_tags=filename,mimetype",
+        "-show_entries",
+        "stream=index,codec_name:stream_disposition=attached_pic:stream_tags=filename,mimetype",
         "-of", "json",
         video_path,
     ]

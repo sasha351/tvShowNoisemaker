@@ -93,6 +93,20 @@ def _ffprobe_result(streams):
     )
 
 
+def test_embedded_cover_probe_requests_disposition_in_combined_entry():
+    """Regression guard: disposition must live in the same -show_entries value
+    as stream/tags. ffprobe silently drops disposition if it's split into a
+    separate -show_entries flag, which mocked-output tests can't detect."""
+    streams = [{"index": 0, "codec_name": "hevc", "disposition": {"attached_pic": 0}}]
+    with patch("subprocess.run", return_value=_ffprobe_result(streams)) as mock_run:
+        _find_embedded_cover_index("/v.mkv")
+    cmd = mock_run.call_args.args[0]
+    assert (
+        "stream=index,codec_name:stream_disposition=attached_pic:stream_tags=filename,mimetype"
+        in cmd
+    )
+
+
 def test_embedded_cover_skips_the_primary_video_stream():
     streams = [
         {"index": 0, "codec_name": "hevc", "disposition": {"attached_pic": 0}},
