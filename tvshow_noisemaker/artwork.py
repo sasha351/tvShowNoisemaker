@@ -76,8 +76,13 @@ def _find_embedded_cover_index(video_path: str) -> Optional[int]:
 
     Matroska attachments surface as video streams, so the primary video track
     has to be told apart from the cover.  On the observed library the cover
-    carries ``filename``/``mimetype`` tags and no ``attached_pic`` disposition,
-    and its index varies between files -- hence the probe.
+    carries both signals -- ``filename``/``mimetype`` tags and
+    ``attached_pic: 1`` -- either one alone is sufficient to identify it, while
+    the primary video stream reports ``attached_pic: 0``.  The disposition
+    only comes through when requested in the same ``-show_entries`` value as
+    ``stream``/``stream_tags``; splitting it into a separate
+    ``stream_disposition=`` flag makes ffprobe drop it silently.  The cover's
+    index varies between files -- hence the probe.
     """
     cmd = [
         "ffprobe", "-v", "error",
@@ -138,6 +143,10 @@ def _normalize(input_args: list[str], dest: str) -> bool:
         dest,
     ]
     logger.debug("Artwork cmd: %s", " ".join(cmd))
+
+    # A stale file from an earlier failed tier would otherwise let this tier's
+    # success check pass on someone else's bytes.
+    Path(dest).unlink(missing_ok=True)
 
     try:
         result = subprocess.run(

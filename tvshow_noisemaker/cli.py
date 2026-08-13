@@ -617,8 +617,9 @@ def run(args: argparse.Namespace) -> int:
     encode_sec = time.monotonic() - encode_stage_start
 
     # ponytail: cleaned up after the pool rather than via try/finally, which
-    # would mean re-indenting the whole encode phase.  A crash leaks one 26 KB
-    # JPEG into the OS temp dir, which the OS reclaims.
+    # would mean re-indenting the whole encode phase.  A crash or a GUI cancel
+    # (SIGTERM from gui.py's Cancel button) leaks one 26 KB JPEG into the OS
+    # temp dir, which the OS reclaims.
     shutil.rmtree(artwork_dir, ignore_errors=True)
 
     # Finish progress line before summary logging

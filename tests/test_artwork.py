@@ -192,9 +192,12 @@ def test_embedded_cover_none_on_timeout():
 
 def test_normalize_builds_a_scale_filter(tmp_path):
     dest = tmp_path / "cover.jpg"
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+    def _fake_ffmpeg(*args, **kwargs):
         dest.write_bytes(b"jpegdata")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_ffmpeg) as mock_run:
         assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is True
     cmd = mock_run.call_args[0][0]
     assert cmd[0] == "ffmpeg"
@@ -264,6 +267,16 @@ def test_normalize_false_when_output_empty(tmp_path):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         dest.write_bytes(b"")
         assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+
+
+def test_normalize_does_not_report_success_from_a_stale_file(tmp_path):
+    """A leftover file from an earlier failed tier must not count as success."""
+    dest = tmp_path / "cover.jpg"
+    dest.write_bytes(b"stale bytes from a previous tier")
+    result = MagicMock(returncode=1, stdout="", stderr="bad image")
+    with patch("subprocess.run", return_value=result):
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+    assert not dest.exists()
 
 
 def test_normalize_false_when_ffmpeg_missing(tmp_path):
