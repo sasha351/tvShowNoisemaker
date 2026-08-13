@@ -52,9 +52,18 @@ Three facts drive the design:
 
 1. **The cover stream index varies between files** — index 3 in some episodes,
    index 4 in others. The index must be probed per file, never hardcoded.
-2. **The cover stream has no `attached_pic` disposition.** Both the real video
-   stream and the cover report an empty disposition, so disposition alone
-   cannot identify the cover. The `filename`/`mimetype` tags can.
+2. **Disposition must be requested through `stream_disposition=`, not
+   `stream=`.** ffprobe silently omits the field — no error — when it is asked
+   for as `-show_entries stream=index,codec_name,disposition`, which makes it
+   look as though the cover has no disposition. Asked for correctly, as
+   `-show_entries "stream=index,codec_name:stream_disposition=attached_pic:stream_tags=filename,mimetype"`,
+   the cover reports `attached_pic: 1` and the primary video stream reports
+   `attached_pic: 0`. Both `attached_pic` and the `filename`/`mimetype` tags
+   are therefore reliable discriminators on this library.
+
+   (An earlier revision of this spec recorded the opposite, that the cover had
+   no disposition. That was an artifact of the wrong field syntax, caught in
+   review of Task 3 and verified against `test_media`.)
 3. **ffprobe on these files takes several seconds each** (~9s observed). A
    probe per episode would add minutes to a season. Resolving once per run
    keeps it to a single probe.
@@ -105,14 +114,18 @@ Probe `sample_video` for candidate streams:
 
 ```
 ffprobe -v error -select_streams v \
-  -show_entries stream=index,codec_name,disposition \
-  -show_entries stream_tags=filename,mimetype -of json <sample_video>
+  -show_entries "stream=index,codec_name:stream_disposition=attached_pic:stream_tags=filename,mimetype" \
+  -of json <sample_video>
 ```
 
+The single combined `-show_entries` argument is required. Splitting it into
+repeated `-show_entries` flags, or asking for `disposition` inside the
+`stream=` section, makes ffprobe drop the field silently.
+
 A stream is the cover when `codec_name` is `mjpeg` or `png` **and** it either
-has a `filename`/`mimetype` tag or the `attached_pic` disposition set. The
-disposition check is kept as a secondary signal for containers that do set it;
-the tag check is what works on this library. The lowest matching index is used.
+has a `filename`/`mimetype` tag or the `attached_pic` disposition set. Both
+signals work on this library; keeping the pair means the probe also handles
+containers that set only one of them. The lowest matching index is used.
 
 Extract it with the normalization step below, mapping the probed index.
 
