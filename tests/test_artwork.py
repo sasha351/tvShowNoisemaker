@@ -203,6 +203,46 @@ def test_normalize_builds_a_scale_filter(tmp_path):
     assert cmd[-1] == str(dest)
 
 
+def test_normalize_frame_grab_input_args_stay_ordered_before_i(tmp_path):
+    """Regression guard: -ss must precede -i (input seek, not output seek).
+
+    An output seek (-ss after -i) still runs but decodes from frame zero,
+    which is far slower -- a correctness-preserving but performance-killing
+    reorder that membership-only assertions can't catch.
+    """
+    dest = tmp_path / "cover.jpg"
+    input_args = ["-ss", "90.0", "-i", "/v.mkv", "-map", "0:v:0"]
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        dest.write_bytes(b"jpegdata")
+        _normalize(input_args, str(dest))
+    cmd = mock_run.call_args[0][0]
+    assert cmd.index("-ss") < cmd.index("-i")
+    assert cmd[cmd.index("-ss") + 1] == "90.0"
+
+    # input_args must appear contiguously and in order, sandwiched between
+    # ffmpeg's leading flags and the trailing -frames:v 1 -vf <scale> <dest>.
+    start = cmd.index("-ss")
+    assert cmd[start : start + len(input_args)] == input_args
+    tail = cmd[start + len(input_args) :]
+    assert tail[:2] == ["-frames:v", "1"]
+    assert tail[2] == "-vf"
+    assert tail[3] == "scale=w=600:h=600:force_original_aspect_ratio=decrease"
+    assert tail[4] == str(dest)
+
+
+def test_normalize_embedded_cover_map_follows_its_i(tmp_path):
+    dest = tmp_path / "cover.jpg"
+    input_args = ["-i", "/v.mkv", "-map", "0:3"]
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        dest.write_bytes(b"jpegdata")
+        _normalize(input_args, str(dest))
+    cmd = mock_run.call_args[0][0]
+    assert cmd.index("-i") < cmd.index("-map")
+    assert cmd[cmd.index("-map") + 1] == "0:3"
+
+
 def test_normalize_false_on_ffmpeg_failure(tmp_path):
     dest = tmp_path / "cover.jpg"
     result = MagicMock(returncode=1, stdout="", stderr="bad image")
@@ -278,7 +318,9 @@ def test_resolve_falls_through_to_frame_grab(tmp_path):
     assert "frame" in result[1]
     args = norm.call_args[0][0]
     assert "-ss" in args
-    assert "90.0" in args  # intro_end 30.0 + 60s offset
+    assert "-i" in args
+    assert args.index("-ss") < args.index("-i")  # input seek, not output seek
+    assert args[args.index("-ss") + 1] == "90.0"  # intro_end 30.0 + 60s offset
     assert "0:v:0" in args
 
 
@@ -291,6 +333,7 @@ def test_resolve_frame_grab_seek_never_negative(tmp_path):
          patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=None):
         resolve_artwork(str(season), "/v.mkv", -500.0, str(work))
     args = norm.call_args[0][0]
+    assert args.index("-ss") < args.index("-i")  # input seek, not output seek
     seek = float(args[args.index("-ss") + 1])
     assert seek >= 0.0
 
