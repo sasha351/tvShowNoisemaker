@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tvshow_noisemaker.artwork import _find_embedded_cover_index, _find_sidecar
+from tvshow_noisemaker.artwork import (
+    _find_embedded_cover_index,
+    _find_sidecar,
+    _normalize,
+    resolve_artwork,
+)
 
 
 def _touch(path: Path) -> Path:
@@ -178,3 +183,136 @@ def test_embedded_cover_none_on_timeout():
     exc = subprocess.TimeoutExpired("ffprobe", 60)
     with patch("subprocess.run", side_effect=exc):
         assert _find_embedded_cover_index("/v.mkv") is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_builds_a_scale_filter(tmp_path):
+    dest = tmp_path / "cover.jpg"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        dest.write_bytes(b"jpegdata")
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is True
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "ffmpeg"
+    assert "/src/poster.jpg" in cmd
+    assert "scale=w=600:h=600:force_original_aspect_ratio=decrease" in cmd
+    assert cmd[-1] == str(dest)
+
+
+def test_normalize_false_on_ffmpeg_failure(tmp_path):
+    dest = tmp_path / "cover.jpg"
+    result = MagicMock(returncode=1, stdout="", stderr="bad image")
+    with patch("subprocess.run", return_value=result):
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+
+
+def test_normalize_false_when_output_missing(tmp_path):
+    """ffmpeg can exit 0 without writing anything usable."""
+    dest = tmp_path / "cover.jpg"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+
+
+def test_normalize_false_when_output_empty(tmp_path):
+    dest = tmp_path / "cover.jpg"
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        dest.write_bytes(b"")
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+
+
+def test_normalize_false_when_ffmpeg_missing(tmp_path):
+    dest = tmp_path / "cover.jpg"
+    with patch("subprocess.run", side_effect=FileNotFoundError("no ffmpeg")):
+        assert _normalize(["-i", "/src/poster.jpg"], str(dest)) is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_artwork
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_uses_sidecar_first(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    _touch(season / "poster.jpg")
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", return_value=True) as norm, \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index") as probe:
+        result = resolve_artwork(str(season), "/v.mkv", 30.0, str(work))
+    assert result is not None
+    path, source = result
+    assert path == str(work / "cover.jpg")
+    assert "poster.jpg" in source
+    probe.assert_not_called()
+    assert str(season / "poster.jpg") in norm.call_args[0][0]
+
+
+def test_resolve_falls_through_to_embedded_cover(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", return_value=True) as norm, \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=3):
+        result = resolve_artwork(str(season), "/v.mkv", 30.0, str(work))
+    assert result is not None
+    assert "embedded" in result[1]
+    assert "0:3" in norm.call_args[0][0]
+
+
+def test_resolve_falls_through_to_frame_grab(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", return_value=True) as norm, \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=None):
+        result = resolve_artwork(str(season), "/v.mkv", 30.0, str(work))
+    assert result is not None
+    assert "frame" in result[1]
+    args = norm.call_args[0][0]
+    assert "-ss" in args
+    assert "90.0" in args  # intro_end 30.0 + 60s offset
+    assert "0:v:0" in args
+
+
+def test_resolve_frame_grab_seek_never_negative(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", return_value=True) as norm, \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=None):
+        resolve_artwork(str(season), "/v.mkv", -500.0, str(work))
+    args = norm.call_args[0][0]
+    seek = float(args[args.index("-ss") + 1])
+    assert seek >= 0.0
+
+
+def test_resolve_falls_through_when_sidecar_is_corrupt(tmp_path):
+    """A sidecar that fails to normalize must not block the embedded tier."""
+    season = tmp_path / "Show" / "Season 01"
+    _touch(season / "poster.jpg")
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", side_effect=[False, True]), \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=3):
+        result = resolve_artwork(str(season), "/v.mkv", 30.0, str(work))
+    assert result is not None
+    assert "embedded" in result[1]
+
+
+def test_resolve_returns_none_when_every_tier_fails(tmp_path):
+    season = tmp_path / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    with patch("tvshow_noisemaker.artwork._normalize", return_value=False), \
+         patch("tvshow_noisemaker.artwork._find_embedded_cover_index", return_value=None):
+        assert resolve_artwork(str(season), "/v.mkv", 30.0, str(work)) is None

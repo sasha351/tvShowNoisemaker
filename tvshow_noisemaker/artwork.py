@@ -116,3 +116,75 @@ def _find_embedded_cover_index(video_path: str) -> Optional[int]:
         if tags.get("filename") or tags.get("mimetype") or disposition.get("attached_pic"):
             return stream.get("index")
     return None
+
+
+def _normalize(input_args: list[str], dest: str) -> bool:
+    """Write a single downscaled JPEG to *dest*.  Return True on success.
+
+    Every tier goes through here, so the embedded image is the same shape and
+    size no matter where it came from.  Aspect ratio is preserved and nothing
+    is cropped, so poster text stays intact.
+    """
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        *input_args,
+        "-frames:v", "1",
+        "-vf",
+        f"scale=w={_MAX_EDGE}:h={_MAX_EDGE}:force_original_aspect_ratio=decrease",
+        dest,
+    ]
+    logger.debug("Artwork cmd: %s", " ".join(cmd))
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("Artwork: ffmpeg failed: %s", exc)
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "Artwork: ffmpeg exited %d: %s", result.returncode, result.stderr[-300:]
+        )
+        return False
+
+    output = Path(dest)
+    return output.is_file() and output.stat().st_size > 0
+
+
+def resolve_artwork(
+    input_dir: str,
+    sample_video: str,
+    intro_end: float,
+    workdir: str,
+) -> Optional[tuple[str, str]]:
+    """Resolve one cover image for a run.
+
+    Returns ``(path_to_jpeg, source_description)``, or ``None`` when no
+    artwork could be produced.  *sample_video* is one episode standing in for
+    the whole run: every episode of a season shares an album, and probing each
+    file costs seconds.  *intro_end* is that episode's detected intro
+    boundary, used to seek past the intro when grabbing a frame.
+    """
+    dest = str(Path(workdir) / "cover.jpg")
+
+    sidecar = _find_sidecar(input_dir)
+    if sidecar is not None and _normalize(["-i", str(sidecar)], dest):
+        return dest, f"sidecar image ({sidecar.name})"
+
+    index = _find_embedded_cover_index(sample_video)
+    if index is not None and _normalize(
+        ["-i", sample_video, "-map", f"0:{index}"], dest
+    ):
+        return dest, f"embedded cover (stream {index})"
+
+    # ponytail: no blackframe detection -- a dull frame beats no art, and this
+    # tier never fired across the test library.  Add a blackframe filter or a
+    # TMDB lookup here if real runs start producing bad covers.
+    seek = max(intro_end + _FRAME_GRAB_OFFSET, 0.0)
+    if _normalize(["-ss", str(seek), "-i", sample_video, "-map", "0:v:0"], dest):
+        return dest, f"video frame at {seek:.0f}s"
+
+    logger.warning("Artwork: no cover could be resolved for %s", input_dir)
+    return None
