@@ -115,7 +115,9 @@ For a double-clickable launcher (no terminal at all), run once:
 ./build_app.sh
 ```
 
-This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight/Launchpad. Drag it to the Dock for a permanent icon. Rerun the script any time (e.g. after moving the repo) to rebuild it.
+This installs `TV Show Noisemaker.app` to `~/Applications` and registers it with LaunchServices so it appears in Spotlight/Launchpad immediately. Drag it to the Dock for a permanent icon. Rerun the script any time (e.g. after moving the repo) to rebuild it.
+
+The app does not require a project `.venv`: it launches with the interpreter recorded at build time, falling back to `python3` on your `PATH`, and shows a dialog explaining what to install if the required packages are missing. If you change which Python has the package installed, just rerun `./build_app.sh`.
 
 ## CLI Flags (Most Used)
 
