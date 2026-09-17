@@ -158,7 +158,7 @@ def probe_durations(files: List[str], progress: ProgressFn = _noop_progress) -> 
     """
     durations: Dict[str, float] = {}
     failed: List[str] = []
-    workers = min(len(files), max(1, os.cpu_count() or 2))
+    workers = max(1, min(len(files), max(1, os.cpu_count() or 2)))
     done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {pool.submit(get_duration, fp): fp for fp in files}
@@ -199,46 +199,48 @@ def _resolve_episode(
         intro_start, intro_end, outro_start = resolve_boundaries(
             fp, cfg=cfg, fingerprint_results=fingerprint_results, duration=duration,
         )
+        ep.intro_start, ep.intro_end, ep.outro_start = intro_start, intro_end, outro_start
+
+        ts = cfg.timestamps.get(ep.basename, {})
+        has_timestamp_override = ts.get("intro_end") is not None or ts.get("outro_start") is not None
+        has_user_duration_override = cfg.intro_duration is not None or cfg.outro_duration is not None
+        _, fp_ie, fp_os = fingerprint_results.get(fp, (None, None, None))
+        has_fingerprint_boundary = fp_ie is not None or fp_os is not None
+
+        if has_timestamp_override or has_user_duration_override:
+            ep.source = "config"
+        elif has_fingerprint_boundary:
+            ep.source = "fingerprint"
+        else:
+            ep.source = "silence"
+
+        # No strategy produced boundaries: skip rather than convert the whole file.
+        is_unresolved_defaults = (
+            duration is not None
+            and intro_end is not None
+            and outro_start is not None
+            and abs(intro_end) < 1e-6
+            and abs(outro_start - duration) < 1e-3
+        )
+        if (
+            is_unresolved_defaults
+            and not has_timestamp_override
+            and not has_user_duration_override
+            and not has_fingerprint_boundary
+        ):
+            ep.confidence = "skip"
+            ep.flags.append("No intro/outro boundaries detected (skipped to avoid full-file conversion)")
+            return ep
+
+        # A None boundary just leaves `encodable` False; only compare when both are known.
+        if intro_end is not None and outro_start is not None and outro_start <= intro_end:
+            ep.confidence = "skip"
+            ep.flags.append(
+                f"Invalid boundaries: intro_end={intro_end:.2f}s >= outro_start={outro_start:.2f}s"
+            )
     except Exception as exc:  # pylint: disable=broad-except
         ep.confidence = "skip"
-        ep.flags.append(f"Boundary detection error: {exc}")
-        return ep
-    ep.intro_start, ep.intro_end, ep.outro_start = intro_start, intro_end, outro_start
-
-    ts = cfg.timestamps.get(ep.basename, {})
-    has_timestamp_override = ts.get("intro_end") is not None or ts.get("outro_start") is not None
-    has_user_duration_override = cfg.intro_duration is not None or cfg.outro_duration is not None
-    _, fp_ie, fp_os = fingerprint_results.get(fp, (None, None, None))
-    has_fingerprint_boundary = fp_ie is not None or fp_os is not None
-
-    if has_timestamp_override or has_user_duration_override:
-        ep.source = "config"
-    elif has_fingerprint_boundary:
-        ep.source = "fingerprint"
-    else:
-        ep.source = "silence"
-
-    # No strategy produced boundaries: skip rather than convert the whole file.
-    is_unresolved_defaults = (
-        duration is not None
-        and abs(intro_end) < 1e-6
-        and abs(outro_start - duration) < 1e-3
-    )
-    if (
-        is_unresolved_defaults
-        and not has_timestamp_override
-        and not has_user_duration_override
-        and not has_fingerprint_boundary
-    ):
-        ep.confidence = "skip"
-        ep.flags.append("No intro/outro boundaries detected (skipped to avoid full-file conversion)")
-        return ep
-
-    if outro_start <= intro_end:
-        ep.confidence = "skip"
-        ep.flags.append(
-            f"Invalid boundaries: intro_end={intro_end:.2f}s >= outro_start={outro_start:.2f}s"
-        )
+        ep.flags = [f"Boundary detection error: {exc}"]
     return ep
 
 
@@ -261,15 +263,17 @@ def _log_episode(
         logger.warning("  ✗ Skipped – %s", ep.flags[0] if ep.flags else "not encodable")
         return
     intro_start = ep.intro_start or 0.0
-    if intro_start > 1.0 and intro_start < (ep.intro_end or 0.0):
+    intro_end = ep.intro_end or 0.0
+    outro_start = ep.outro_start or 0.0
+    if intro_start > 1.0 and intro_start < intro_end:
         logger.info(
             "  Cut intro: keep [0–%.1fs] + [%.1fs–%.1fs]  (keeping %.1fs, removing %.1fs)",
-            intro_start, ep.intro_end, ep.outro_start, ep.content_duration, ep.trimmed_duration,
+            intro_start, intro_end, outro_start, ep.content_duration, ep.trimmed_duration,
         )
     else:
         logger.info(
             "  Trim: %.1fs → %.1fs  (keeping %.1fs, removing %.1fs)",
-            ep.intro_end, ep.outro_start, ep.content_duration, ep.trimmed_duration,
+            intro_end, outro_start, ep.content_duration, ep.trimmed_duration,
         )
 
 
@@ -302,7 +306,7 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
     plan.stage_timings["fingerprint"] = time.monotonic() - t0
 
     t0 = time.monotonic()
-    workers = min(cfg.workers or max(1, (os.cpu_count() or 2) // 2), len(files))
+    workers = max(1, min(cfg.workers or max(1, (os.cpu_count() or 2) // 2), len(files)))
     by_path: Dict[str, EpisodePlan] = {}
     done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -312,7 +316,13 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
         }
         for future in concurrent.futures.as_completed(future_map):
             fp = future_map[future]
-            by_path[fp] = future.result()  # _resolve_episode never raises
+            try:
+                by_path[fp] = future.result()  # _resolve_episode never raises, but guard anyway
+            except Exception as exc:  # pylint: disable=broad-except
+                by_path[fp] = EpisodePlan(
+                    path=fp, duration=durations.get(fp), confidence="skip",
+                    flags=[f"Boundary detection error: {exc}"],
+                )
             done += 1
             progress("boundaries", done, len(files), Path(fp).name)
     plan.episodes = [by_path[fp] for fp in files]

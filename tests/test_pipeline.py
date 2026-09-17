@@ -1,9 +1,25 @@
 """Tests for tvshow_noisemaker.pipeline (all subprocess I/O mocked)."""
 from __future__ import annotations
 
+import threading
+import time
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
-from tvshow_noisemaker.pipeline import EpisodePlan, Plan, Summary
+from tvshow_noisemaker.config import Config
+from tvshow_noisemaker.pipeline import (
+    EpisodePlan,
+    Plan,
+    Summary,
+    default_encode_workers,
+    detect,
+    encode,
+    encode_workers,
+    list_video_files,
+    probe_durations,
+)
 
 
 def _ep(**kw) -> EpisodePlan:
@@ -65,14 +81,6 @@ def test_summary_defaults():
     assert s.cancelled is False
 
 
-import threading
-import time
-from unittest.mock import patch
-
-from tvshow_noisemaker.config import Config
-from tvshow_noisemaker.pipeline import detect, list_video_files, probe_durations
-
-
 def _touch(tmp_path, *names):
     paths = []
     for name in names:
@@ -99,6 +107,20 @@ def test_probe_durations_retries_failed_probe_sequentially(tmp_path):
     with patch("tvshow_noisemaker.pipeline.get_duration", side_effect=_side_effect):
         durations = probe_durations(files)
     assert durations == {files[0]: 2700.0, files[1]: 2700.0}
+
+
+def test_probe_durations_empty_list_returns_empty_dict():
+    assert probe_durations([]) == {}
+
+
+def test_detect_clamps_nonpositive_workers(tmp_path):
+    _touch(tmp_path, "ep01.mp4")
+    with (
+        patch("tvshow_noisemaker.pipeline.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+    ):
+        plan = detect(str(tmp_path), Config(use_fingerprinting=False, workers=-1))
+    assert len(plan.episodes) == 1
 
 
 def test_detect_empty_dir_returns_empty_plan(tmp_path):
@@ -182,6 +204,17 @@ def test_detect_skips_inverted_boundaries(tmp_path):
     assert plan.episodes[0].flags[0].startswith("Invalid boundaries")
 
 
+def test_detect_tolerates_none_boundaries_from_resolver(tmp_path):
+    _touch(tmp_path, "ep01.mp4")
+    with (
+        patch("tvshow_noisemaker.pipeline.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, None, 2650.0)),
+    ):
+        plan = detect(str(tmp_path), Config(use_fingerprinting=False))
+    assert len(plan.episodes) == 1
+    assert plan.episodes[0].encodable is False
+
+
 def test_detect_turns_resolver_exception_into_skip(tmp_path):
     _touch(tmp_path, "ep01.mp4")
     with (
@@ -228,11 +261,6 @@ def test_detect_reports_progress_per_stage(tmp_path):
     assert stages == {"probe", "boundaries"}
     assert ("probe", 2, 2) in {e[:3] for e in events}
     assert ("boundaries", 2, 2) in {e[:3] for e in events}
-
-
-from pathlib import Path
-
-from tvshow_noisemaker.pipeline import default_encode_workers, encode, encode_workers
 
 
 def _plan(tmp_path, n=3, output_format="mp3"):

@@ -37,6 +37,7 @@ class Row:
     flags: List[str]
     errors: Dict[str, Optional[float]] = field(default_factory=dict)  # detected − truth
     clipped: List[str] = field(default_factory=list)
+    undetected: List[str] = field(default_factory=list)
     missed_no_intro: bool = False
 
 
@@ -62,6 +63,8 @@ def compare_episode(ep: EpisodePlan, truth: dict, tolerance: float = CLIP_TOLERA
         detected = getattr(ep, name)
         if expected is None or detected is None:
             row.errors[name] = None
+            if expected is not None and detected is None:
+                row.undetected.append(name)
             continue
         err = detected - expected
         row.errors[name] = err
@@ -90,6 +93,8 @@ def report(rows: List[Row]) -> str:
         notes = []
         if r.clipped:
             notes.append("CLIPPED " + ",".join(r.clipped))
+        if r.undetected:
+            notes.append("UNDETECTED " + ",".join(r.undetected))
         if r.missed_no_intro:
             notes.append("NO-INTRO CUT")
         notes.extend(r.flags)
@@ -97,6 +102,7 @@ def report(rows: List[Row]) -> str:
     lines.append("")
     lines.append(f"episodes compared: {len(rows)}")
     lines.append(f"clipped dialogue: {sum(1 for r in rows if r.clipped)}")
+    lines.append(f"undetected boundaries: {sum(1 for r in rows if r.undetected)}")
     lines.append(f"no-intro episodes cut anyway: {sum(1 for r in rows if r.missed_no_intro)}")
     for name in BOUNDARIES:
         errs = [abs(r.errors[name]) for r in rows if r.errors.get(name) is not None]

@@ -337,6 +337,11 @@ def run(args: argparse.Namespace) -> int:
         if cfg.use_fingerprinting and len(video_files) >= 2:
             con.info("Running audio fingerprinting across %d episodes…", len(video_files))
         plan = detect(str(input_dir), cfg)
+        if cfg.use_fingerprinting and len(video_files) >= 2 and not plan.fingerprint_stats:
+            con.warning(
+                "Fingerprinting failed – fell back to silence detection "
+                "(results may be less accurate); see the log file"
+            )
         if getattr(args, "benchmark_fingerprint", False) and plan.fingerprint_stats:
             fp_stats = plan.fingerprint_stats
             con.info(

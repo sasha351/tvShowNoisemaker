@@ -41,6 +41,7 @@ def test_compare_skips_unlisted_and_uncomparable_boundaries():
     row = compare_episode(_ep(outro_start=None), {"intro_end": 30.0, "outro_start": 1270.0})
     assert row.errors == {"intro_end": 0.0, "outro_start": None}
     assert row.clipped == []
+    assert row.undetected == ["outro_start"]
 
 
 def test_compare_flags_high_confidence_cut_when_truth_says_no_intro():
@@ -64,9 +65,11 @@ def test_report_summarises_counts():
         Row(key="a", confidence="high", flags=[], errors={"intro_end": 0.4}, clipped=["intro_end"], missed_no_intro=False),
         Row(key="b", confidence="high", flags=[], errors={"intro_end": -0.2}, clipped=[], missed_no_intro=False),
         Row(key="c", confidence="review", flags=["x"], errors={}, clipped=[], missed_no_intro=True),
+        Row(key="d", confidence="high", flags=[], errors={"intro_end": None}, undetected=["intro_end"]),
     ]
     text = report(rows)
     assert "clipped dialogue: 1" in text
+    assert "undetected boundaries: 1" in text
     assert "no-intro episodes cut anyway: 1" in text
     assert "max |intro_end| error: 0.40s" in text
     assert "a " in text and "review" in text

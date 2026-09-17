@@ -345,6 +345,55 @@ def test_run_creates_log_file(tmp_path):
     assert log_file.exists()
 
 
+def test_run_warns_on_console_when_fingerprinting_fails(tmp_path, capsys):
+    for name in ("ep01.mp4", "ep02.mp4"):
+        (tmp_path / name).touch()
+    out_dir = tmp_path / "out"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=True,
+    )
+
+    with (
+        patch("tvshow_noisemaker.pipeline.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.pipeline.detect_by_fingerprinting", side_effect=RuntimeError("fpcalc died")),
+        patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.pipeline.process_file"),
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        run(args)
+
+    assert "Fingerprinting failed" in capsys.readouterr().out
+
+
+def test_run_emits_the_strings_the_gui_scrapes(tmp_path, capsys):
+    ep = tmp_path / "ep01.mp4"
+    ep.touch()
+    out_dir = tmp_path / "out"
+    log_file = tmp_path / "run.log"
+    args = _make_args(
+        input_dir=str(tmp_path),
+        output_dir=str(out_dir),
+        fingerprint=False,
+        log_file=str(log_file),
+    )
+
+    with (
+        patch("tvshow_noisemaker.pipeline.get_duration", return_value=2700.0),
+        patch("tvshow_noisemaker.pipeline.detect_by_fingerprinting", return_value={}),
+        patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
+        patch("tvshow_noisemaker.pipeline.process_file"),
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        run(args)
+
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "Starting conversion  (" in log_text
+    assert "✓ Done in" in log_text
+    assert "Starting conversion  (" in capsys.readouterr().out
+
+
 def test_setup_logging_default_console_level_info(tmp_path):
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True, exist_ok=True)
