@@ -169,7 +169,7 @@ def _consensus_segments(
     are grouped into runs by single-linkage: consecutive lengths (sorted)
     join the same run while the gap between them is within *tolerance*, so a
     run can span more than *tolerance* end-to-end when chained through an
-    intermediate vote.  The winning run covers the most episodes (ties →
+    intermediate vote, but never more than ``2 * tolerance``.  The winning run covers the most episodes (ties →
     longer) and must cover ``max(2, ceil(n_episodes / 3))`` of them, otherwise
     the season has no consensus.  An episode's segment is the median of its
     run votes; votes outside the run (recaps, two-parters, shared cues) are
@@ -191,8 +191,8 @@ def _consensus_segments(
     # ponytail: O(n log n) sort + linear scan, fine at season-sized vote counts.
     runs: List[List[float]] = []
     for length in sorted({v[0] for v in votes}):
-        if runs and length - runs[-1][-1] <= tolerance:
-            runs[-1].append(length)
+        if runs and length - runs[-1][-1] <= tolerance and length - runs[-1][0] <= 2 * tolerance:
+            runs[-1].append(length)  # span capped at 2*tolerance so a chain can't drift
         else:
             runs.append([length])
 
