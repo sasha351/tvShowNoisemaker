@@ -51,6 +51,14 @@ def test_compare_flags_high_confidence_cut_when_truth_says_no_intro():
     assert compare_episode(_ep(intro_end=None, confidence="skip"), {"intro_end": None}).missed_no_intro is False
 
 
+def test_compare_no_intro_season_agrees_with_null_truth():
+    """intro_end == 0.0 means 'nothing to cut' and agrees with a null truth."""
+    row = compare_episode(_ep(intro_start=None, intro_end=0.0), {"intro_start": None, "intro_end": None})
+    assert row.missed_no_intro is False
+    assert row.undetected == []
+    assert row.errors == {"intro_start": None, "intro_end": None}
+
+
 def test_season_dirs_finds_folders_that_contain_videos(tmp_path):
     (tmp_path / "A" / "Season 01").mkdir(parents=True)
     (tmp_path / "A" / "Season 01" / "e1.mkv").touch()
@@ -71,5 +79,6 @@ def test_report_summarises_counts():
     assert "clipped dialogue: 1" in text
     assert "undetected boundaries: 1" in text
     assert "no-intro episodes cut anyway: 1" in text
+    assert "review episodes: 1" in text
     assert "max |intro_end| error: 0.40s" in text
-    assert "a " in text and "review" in text
+    assert text.splitlines()[1].startswith("a ") and "review" in text

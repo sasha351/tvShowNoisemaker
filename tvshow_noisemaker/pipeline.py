@@ -143,10 +143,14 @@ class Summary:
 
 
 def list_video_files(input_dir: str) -> List[str]:
-    """Sorted absolute paths of video files directly inside *input_dir*."""
+    """Sorted absolute paths of video files directly inside *input_dir*.
+
+    Dotfiles are skipped: macOS/iCloud leaves ``._<name>`` AppleDouble
+    siblings next to media and they are not playable.
+    """
     return sorted(
         str(p) for p in Path(input_dir).iterdir()
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in VIDEO_EXTENSIONS
     )
 
 

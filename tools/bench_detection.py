@@ -79,7 +79,8 @@ def compare_episode(ep: EpisodePlan, truth: dict, tolerance: float = CLIP_TOLERA
         if loses_dialogue:
             row.clipped.append(name)
     if "intro_end" in truth and truth["intro_end"] is None:
-        row.missed_no_intro = ep.confidence == "high" and ep.intro_end is not None
+        cuts_intro = ep.intro_end is not None and ep.intro_end > (ep.intro_start or 0.0)
+        row.missed_no_intro = ep.confidence == "high" and cuts_intro
     return row
 
 
@@ -104,6 +105,7 @@ def report(rows: List[Row]) -> str:
     lines.append(f"clipped dialogue: {sum(1 for r in rows if r.clipped)}")
     lines.append(f"undetected boundaries: {sum(1 for r in rows if r.undetected)}")
     lines.append(f"no-intro episodes cut anyway: {sum(1 for r in rows if r.missed_no_intro)}")
+    lines.append(f"review episodes: {sum(1 for r in rows if r.confidence == 'review')}")
     for name in BOUNDARIES:
         errs = [abs(r.errors[name]) for r in rows if r.errors.get(name) is not None]
         if errs:

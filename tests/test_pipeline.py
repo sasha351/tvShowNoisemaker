@@ -91,9 +91,9 @@ def _touch(tmp_path, *names):
 
 
 def test_list_video_files_filters_and_sorts(tmp_path):
-    _touch(tmp_path, "b.mkv", "a.MP4", "notes.txt")
+    _touch(tmp_path, "b.mkv", "a.mp4", "notes.txt", "._a.mp4", ".DS_Store")
     (tmp_path / "sub").mkdir()
-    assert [p.split("/")[-1] for p in list_video_files(str(tmp_path))] == ["a.MP4", "b.mkv"]
+    assert [Path(p).name for p in list_video_files(str(tmp_path))] == ["a.mp4", "b.mkv"]
 
 
 def test_probe_durations_retries_failed_probe_sequentially(tmp_path):
