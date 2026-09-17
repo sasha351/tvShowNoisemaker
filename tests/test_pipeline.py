@@ -228,3 +228,152 @@ def test_detect_reports_progress_per_stage(tmp_path):
     assert stages == {"probe", "boundaries"}
     assert ("probe", 2, 2) in {e[:3] for e in events}
     assert ("boundaries", 2, 2) in {e[:3] for e in events}
+
+
+from pathlib import Path
+
+from tvshow_noisemaker.pipeline import default_encode_workers, encode, encode_workers
+
+
+def _plan(tmp_path, n=3, output_format="mp3"):
+    names = [f"ep0{i}.mp4" for i in range(1, n + 1)]
+    files = _touch(tmp_path, *names)
+    return Plan(input_dir=str(tmp_path), episodes=[
+        EpisodePlan(path=fp, duration=2700.0, intro_start=0.0, intro_end=30.0, outro_start=2650.0)
+        for fp in files
+    ])
+
+
+def test_encode_calls_process_file_per_encodable_episode(tmp_path):
+    plan = _plan(tmp_path)
+    out = tmp_path / "out"
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file") as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        summary = encode(plan, Config(workers=2), str(out))
+
+    assert mock_proc.call_count == 3
+    kwargs = mock_proc.call_args.kwargs
+    assert kwargs["intro_end"] == 30.0 and kwargs["outro_start"] == 2650.0
+    assert kwargs["output_path"].startswith(str(out))
+    assert kwargs["mp3_bitrate"] == 256 and kwargs["output_format"] == "mp3"
+    assert sorted(summary.converted) == ["ep01.mp4", "ep02.mp4", "ep03.mp4"]
+    assert summary.content_secs == pytest.approx(3 * 2620.0)
+    assert summary.trimmed_secs == pytest.approx(3 * 80.0)
+    assert summary.failed == [] and summary.skipped == [] and summary.cancelled is False
+
+
+def test_encode_tallies_skips_without_calling_ffmpeg(tmp_path):
+    plan = _plan(tmp_path)
+    plan.episodes[1].confidence = "skip"
+    plan.episodes[1].flags = ["No intro/outro boundaries detected"]
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file") as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        summary = encode(plan, Config(), str(tmp_path / "out"))
+    assert mock_proc.call_count == 2
+    assert summary.skipped == [("ep02.mp4", "No intro/outro boundaries detected")]
+
+
+def test_encode_one_failure_does_not_stop_batch(tmp_path):
+    plan = _plan(tmp_path)
+
+    def _fail_first(**kwargs):
+        if kwargs["input_path"].endswith("ep01.mp4"):
+            raise RuntimeError("ffmpeg failed")
+
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file", side_effect=_fail_first) as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        summary = encode(plan, Config(workers=1), str(tmp_path / "out"))
+    assert mock_proc.call_count == 3
+    assert summary.failed == [("ep01.mp4", "ffmpeg failed")]
+    assert sorted(summary.converted) == ["ep02.mp4", "ep03.mp4"]
+
+
+def test_encode_resolves_artwork_once_and_passes_path(tmp_path):
+    plan = _plan(tmp_path)
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file") as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=("/work/cover.jpg", "embedded cover")) as mock_art,
+    ):
+        encode(plan, Config(), str(tmp_path / "out"))
+    mock_art.assert_called_once()
+    input_dir_arg, sample_video, intro_end, workdir = mock_art.call_args.args
+    assert input_dir_arg == str(tmp_path) and sample_video.endswith("ep01.mp4")
+    assert intro_end == 30.0 and isinstance(workdir, str)
+    for c in mock_proc.call_args_list:
+        assert c.kwargs["artwork_path"] == "/work/cover.jpg"
+
+
+def test_encode_skips_artwork_for_wav(tmp_path):
+    plan = _plan(tmp_path)
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file") as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork") as mock_art,
+    ):
+        encode(plan, Config(output_format="wav"), str(tmp_path / "out"))
+    mock_art.assert_not_called()
+    assert all(c.kwargs["artwork_path"] is None for c in mock_proc.call_args_list)
+
+
+def test_encode_removes_artwork_temp_dir(tmp_path):
+    plan = _plan(tmp_path)
+    seen = {}
+
+    def _capture(input_dir, sample, intro_end, workdir):
+        seen["workdir"] = workdir
+        return None
+
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file"),
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", side_effect=_capture),
+    ):
+        encode(plan, Config(), str(tmp_path / "out"))
+    assert not Path(seen["workdir"]).exists()
+
+
+def test_encode_honours_cancel_event(tmp_path):
+    plan = _plan(tmp_path)
+    cancel = threading.Event()
+    cancel.set()
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file") as mock_proc,
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        summary = encode(plan, Config(workers=1), str(tmp_path / "out"), cancel=cancel)
+    mock_proc.assert_not_called()
+    assert summary.cancelled is True
+    assert len(summary.skipped) == 3 and all(reason == "Cancelled" for _, reason in summary.skipped)
+
+
+def test_encode_reports_progress(tmp_path):
+    plan = _plan(tmp_path)
+    plan.episodes[2].confidence = "skip"
+    events = []
+    with (
+        patch("tvshow_noisemaker.pipeline.process_file"),
+        patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
+    ):
+        encode(plan, Config(), str(tmp_path / "out"), progress=lambda *e: events.append(e))
+    assert events[0][:3] == ("encode", 1, 3)   # the skip counts as done up front
+    assert events[-1][:3] == ("encode", 3, 3)
+
+
+def test_default_encode_workers_uses_all_cores():
+    with patch("tvshow_noisemaker.pipeline.os.cpu_count", return_value=8):
+        assert default_encode_workers() == 8
+
+
+def test_default_encode_workers_unknown_cpu_count():
+    with patch("tvshow_noisemaker.pipeline.os.cpu_count", return_value=None):
+        assert default_encode_workers() == 2
+
+
+def test_encode_workers_respects_explicit_and_job_count():
+    assert encode_workers(Config(workers=4), n_jobs=10) == 4
+    assert encode_workers(Config(workers=4), n_jobs=2) == 2
+    assert encode_workers(Config(), n_jobs=0) == 1

@@ -12,11 +12,15 @@ import json
 import concurrent.futures
 import logging
 import os
+import shutil
+import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from tvshow_noisemaker.artwork import resolve_artwork
 from tvshow_noisemaker.config import Config
 from tvshow_noisemaker.detector import (
     detect_by_fingerprinting,
@@ -24,6 +28,8 @@ from tvshow_noisemaker.detector import (
     get_last_fingerprint_stats,
     resolve_boundaries,
 )
+from tvshow_noisemaker.metadata import infer_track_metadata
+from tvshow_noisemaker.processor import build_output_path, process_file
 
 logger = logging.getLogger(__name__)
 
@@ -315,3 +321,131 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
     for ep in plan.episodes:
         _log_episode(ep, fingerprint_results)
     return plan
+
+
+# ---------------------------------------------------------------------------
+# Encoding
+# ---------------------------------------------------------------------------
+
+
+class _Cancelled(Exception):
+    """Raised inside a worker when the cancel event is set before it starts."""
+
+
+def default_encode_workers() -> int:
+    """libmp3lame is single-threaded per ffmpeg process, so one worker per core."""
+    return max(1, os.cpu_count() or 2)
+
+
+def encode_workers(cfg: Config, n_jobs: int) -> int:
+    workers = cfg.workers or default_encode_workers()
+    return min(workers, n_jobs) if n_jobs else 1
+
+
+def _file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def encode(
+    plan: Plan,
+    cfg: Config,
+    output_dir: str,
+    progress: ProgressFn = _noop_progress,
+    cancel: Optional[threading.Event] = None,
+) -> Summary:
+    """Encode every encodable episode of *plan* into *output_dir*.
+
+    Episodes marked ``skip`` (or missing boundaries) are tallied as skipped
+    without touching ffmpeg.  Setting *cancel* stops new files from starting;
+    files already encoding run to completion.
+    """
+    summary = Summary()
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    jobs: List[EpisodePlan] = []
+    for ep in plan.episodes:
+        if ep.encodable:
+            jobs.append(ep)
+        else:
+            summary.skipped.append((ep.basename, ep.flags[0] if ep.flags else "Not encodable"))
+    total = len(plan.episodes)
+    lock = threading.Lock()
+
+    def _done_count() -> int:
+        return len(summary.converted) + len(summary.skipped) + len(summary.failed)
+
+    artwork_path: Optional[str] = None
+    artwork_dir = tempfile.mkdtemp(prefix="tvshow-art-")
+    try:
+        # One cover per run: every episode in a season shares an album, and
+        # probing each file costs seconds.  wav's muxer rejects video streams.
+        if jobs and cfg.output_format != "wav":
+            resolved = resolve_artwork(plan.input_dir, jobs[0].path, jobs[0].intro_end, artwork_dir)
+            if resolved is not None:
+                artwork_path, artwork_source = resolved
+                logger.info("Artwork: %s", artwork_source)
+            else:
+                logger.info("Artwork: none found — encoding without cover art")
+
+        progress("encode", _done_count(), total, "Starting")
+
+        def _encode_one(ep: EpisodePlan) -> Tuple[float, str, int]:
+            if cancel is not None and cancel.is_set():
+                raise _Cancelled()
+            output_path = build_output_path(ep.path, str(out_dir), cfg.output_format)
+            metadata = infer_track_metadata(ep.path, plan.input_dir)
+            started = time.monotonic()
+            process_file(
+                input_path=ep.path,
+                output_path=output_path,
+                intro_end=ep.intro_end,
+                outro_start=ep.outro_start,
+                intro_start=ep.intro_start or 0.0,
+                mp3_bitrate=cfg.mp3_bitrate,
+                output_format=cfg.output_format,
+                metadata=metadata,
+                artwork_path=artwork_path,
+            )
+            return time.monotonic() - started, output_path, _file_size(output_path)
+
+        t0 = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=encode_workers(cfg, len(jobs))) as pool:
+            future_map = {pool.submit(_encode_one, ep): ep for ep in jobs}
+            for future in concurrent.futures.as_completed(future_map):
+                ep = future_map[future]
+                try:
+                    elapsed, output_path, size = future.result()
+                    with lock:
+                        summary.converted.append(ep.basename)
+                        summary.output_bytes += size
+                        summary.content_secs += ep.content_duration
+                        summary.trimmed_secs += ep.trimmed_duration
+                    logger.info(
+                        "  ✓ Done in %.1fs → %s (%s)", elapsed, Path(output_path).name, fmt_bytes(size),
+                    )
+                except _Cancelled:
+                    with lock:
+                        summary.cancelled = True
+                        summary.skipped.append((ep.basename, "Cancelled"))
+                except Exception as exc:  # pylint: disable=broad-except
+                    logger.error("  ✗ Failed – %s: %s", ep.basename, exc)
+                    with lock:
+                        summary.failed.append((ep.basename, str(exc)))
+                progress("encode", _done_count(), total, ep.basename)
+        summary.encode_sec = time.monotonic() - t0
+    finally:
+        shutil.rmtree(artwork_dir, ignore_errors=True)
+    return summary
+
+
+def fmt_bytes(num_bytes: float) -> str:
+    """Human-readable size, e.g. ``12.3 MB``."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(num_bytes) < 1024:
+            return f"{num_bytes:.1f} {unit}" if unit != "B" else f"{int(num_bytes)} B"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
