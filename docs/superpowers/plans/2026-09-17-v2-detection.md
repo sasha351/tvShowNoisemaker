@@ -252,9 +252,9 @@ def test_consensus_tie_goes_to_the_longer_cluster():
 
 
 def test_consensus_needs_a_third_of_the_season():
-    """One pair out of six episodes is not a season intro (needs max(2, ceil(6/3)) = 2 ... ) so use 9."""
+    """One pair in a nine-episode season is not a season intro (needs max(2, ceil(9/3)) = 3 episodes)."""
     matches = [_theme("a", "b", length=40.0)]
-    c = _consensus_segments(matches, n_episodes=9)  # needs 3 episodes
+    c = _consensus_segments(matches, n_episodes=9)
     assert c.median_len is None
     assert c.segments == {} and c.support == {}
     assert c.outliers == {"a": [40.0], "b": [40.0]}
@@ -283,15 +283,19 @@ Add a no-fill test:
 def test_detect_by_chromaprint_does_not_fill_unmatched_episodes():
     filepaths = [f"/show/ep{i:02d}.mp4" for i in range(1, 4)]
     durations = {fp: 1800.0 for fp in filepaths}
-    calls = []
+
+    def _fake_extract(fp, start, _duration):
+        # Intro fingerprints are 1/2/3, outro fingerprints 101/102/103, so the fake
+        # compare can tell passes and episodes apart without depending on call order.
+        ep = int(fp[-6:-4])
+        return np.full(200, ep if start < 0.5 else 100 + ep, dtype=np.uint32), False
 
     def _fake_compare(lhs, rhs, min_dur, max_dur):
-        calls.append(None)
-        # Only the first pair of the intro pass matches; nothing in the outro pass.
-        return ((0.0, 30.0), (0.0, 30.0)) if len(calls) == 1 else (None, None)
+        # Only ep01–ep02 share an intro; nothing shares credits.
+        return ((0.0, 30.0), (0.0, 30.0)) if (int(lhs[0]), int(rhs[0])) == (1, 2) else (None, None)
 
     with (
-        patch("tvshow_noisemaker.detector._extract_chromaprint", return_value=(np.arange(200, dtype=np.uint32), False)),
+        patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=_fake_extract),
         patch("tvshow_noisemaker.detector._compare_episodes_chromaprint", side_effect=_fake_compare),
     ):
         results = _detect_by_chromaprint(filepaths, durations)
@@ -678,7 +682,7 @@ def test_resolve_episode_nothing_shared_in_season_is_skipped():
 def test_resolve_episode_inverted_boundaries_are_skipped():
     fp = "/v/ep01.mkv"
     ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 20.0)}, Config(), _consensus(fp))
-    assert ep.confidence == "skip" and ep.flags[-1].startswith("Invalid boundaries")
+    assert ep.confidence == "skip" and ep.flags[0].startswith("Invalid boundaries")
 ```
 
 Update `test_detect_probes_fingerprints_and_resolves` to the new semantics:
@@ -761,14 +765,15 @@ def _resolve_episode(
         )
         if nothing_detected and ep.source != "config":
             ep.confidence = "skip"
-            ep.flags.append("No intro/outro boundaries detected (skipped to avoid full-file conversion)")
+            # Skip reasons go first: encode() and the log report flags[0].
+            ep.flags.insert(0, "No intro/outro boundaries detected (skipped to avoid full-file conversion)")
             return ep
 
         # A None boundary just leaves `encodable` False; only compare when both are known.
         if ep.intro_end is not None and ep.outro_start is not None and ep.outro_start <= ep.intro_end:
             ep.confidence = "skip"
-            ep.flags.append(
-                f"Invalid boundaries: intro_end={ep.intro_end:.2f}s >= outro_start={ep.outro_start:.2f}s"
+            ep.flags.insert(
+                0, f"Invalid boundaries: intro_end={ep.intro_end:.2f}s >= outro_start={ep.outro_start:.2f}s",
             )
     except Exception as exc:  # pylint: disable=broad-except
         ep.confidence = "skip"
