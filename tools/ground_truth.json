@@ -1,6 +1,238 @@
 {
-  "_comment": "Hand-verified cut points in seconds, keyed by path relative to test_media/. null = that boundary does not exist (no intro / no credits). Omit a key to leave it unchecked. Bootstrap entries with --detect-only, then verify by ear.",
-  "Season 02/Family Guy - S02E13 - Road to Rhode Island (Uncensored).mkv": {
+  "_comment": "Cut points in seconds, keyed by path relative to test_media/. null = that boundary does not exist (no intro / no credits). Omit a key to leave it unchecked. intro_start/intro_end = first/last instant the audio is shared with the rest of the season; outro_start = first instant the credits audio is shared.",
+  "_provenance": "Bootstrapped 2026-09-17 by spectrogram cross-correlation against one reference episode per show (25 ms frames); NOT ear-verified. Outro truth omitted where the shared tail was under 15 s (Friends credits ~6-12 s, inconsistent).",
+  "FamilyGuy02/Family Guy - S02E01 - Peter, Peter, Caviar Eater.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 32.5,
+    "outro_start": 1316.93
+  },
+  "FamilyGuy02/Family Guy - S02E02 - Holy Crap.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 33.5,
+    "outro_start": 1317.96
+  },
+  "FamilyGuy02/Family Guy - S02E03 - Da Boom.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 32.3,
+    "outro_start": 1306.59
+  },
+  "FamilyGuy02/Family Guy - S02E04 - Brian in Love.mkv": {
+    "intro_start": 71.38,
+    "intro_end": 101.85,
+    "outro_start": 1311.52
+  },
+  "FamilyGuy02/Family Guy - S02E05 - Love Thy Trophy.mkv": {
+    "intro_start": 98.47,
+    "intro_end": 128.57
+  },
+  "FamilyGuy02/Family Guy - S02E06 - Death is a Bitch.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 32.52,
+    "outro_start": 1318.47
+  },
+  "FamilyGuy02/Family Guy - S02E07 - The King is Dead.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 32.6,
+    "outro_start": 1316.18
+  },
+  "FamilyGuy02/Family Guy - S02E08 - I Am Peter, Hear Me Roar.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 32.55,
+    "outro_start": 1317.26
+  },
+  "FamilyGuy02/Family Guy - S02E09 - If I'm Dyin' I'm Lyin'.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.57,
+    "outro_start": 1312.0
+  },
+  "FamilyGuy02/Family Guy - S02E10 - Running Mates.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.27,
+    "outro_start": 1332.25
+  },
+  "FamilyGuy02/Family Guy - S02E11 - A Picture's Worth a Thousand Bucks.mkv": {
+    "intro_start": 44.2,
+    "intro_end": 74.42,
+    "outro_start": 1313.06
+  },
+  "FamilyGuy02/Family Guy - S02E12 - Fifteen Minutes of Shame.mkv": {
+    "intro_start": 33.85,
+    "intro_end": 64.05,
+    "outro_start": 1315.45
+  },
+  "FamilyGuy02/Family Guy - S02E13 - Road to Rhode Island (Uncensored).mkv": {
+    "intro_start": null,
+    "intro_end": null,
+    "outro_start": 1316.26
+  },
+  "FamilyGuy02/Family Guy - S02E14 - Let's Go to the Hop.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.43,
+    "outro_start": 1290.65
+  },
+  "FamilyGuy02/Family Guy - S02E15 - Dammit Janet.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.52,
+    "outro_start": 1316.59
+  },
+  "FamilyGuy02/Family Guy - S02E16 - There's Something About Paulie.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.2,
+    "outro_start": 1308.41
+  },
+  "FamilyGuy02/Family Guy - S02E17 - He's Too Sexy for His Fat.mkv": {
+    "intro_start": 95.8,
+    "intro_end": 126.38,
+    "outro_start": 1314.86
+  },
+  "FamilyGuy02/Family Guy - S02E18 - E. Peterbus Unum.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.6,
+    "outro_start": 1314.74
+  },
+  "FamilyGuy02/Family Guy - S02E19 - The Story on Page One.mkv": {
+    "intro_start": 44.98,
+    "intro_end": 75.35,
+    "outro_start": 1298.43
+  },
+  "FamilyGuy02/Family Guy - S02E20 - Wasted Talent.mkv": {
+    "intro_start": 0.0,
+    "intro_end": 31.65
+  },
+  "FamilyGuy02/Family Guy - S02E21 - Fore, Father.mkv": {
+    "intro_start": 44.6,
+    "intro_end": 75.28,
+    "outro_start": 1309.13
+  },
+  "Friends03/Friends.S03E01.The.One.with.the.Princess.Leia.Fantasy.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 20.5,
+    "intro_end": 67.72
+  },
+  "Friends03/Friends.S03E02.The.One.Where.No.One's.Ready.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 78.08,
+    "intro_end": 125.17
+  },
+  "Friends03/Friends.S03E03.The.One.with.the.Jam.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 19.9,
+    "intro_end": 67.17
+  },
+  "Friends03/Friends.S03E04.The.One.with.the.Metaphorical.Tunnel.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 62.15,
+    "intro_end": 109.45
+  },
+  "Friends03/Friends.S03E05.The.One.with.Frank.Jr.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 60.05,
+    "intro_end": 107.35
+  },
+  "Friends03/Friends.S03E06.The.One.with.the.Flashback.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 60.48,
+    "intro_end": 107.67
+  },
+  "Friends03/Friends.S03E07.The.One.with.the.Race.Car.Bed.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 66.17,
+    "intro_end": 113.6
+  },
+  "Friends03/Friends.S03E08.The.One.with.the.Giant.Poking.Device.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 77.35,
+    "intro_end": 124.67
+  },
+  "Friends03/Friends.S03E09.The.One.with.the.Football.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 35.17,
+    "intro_end": 82.2
+  },
+  "Friends03/Friends.S03E10.The.One.Where.Rachel.Quits.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 42.15,
+    "intro_end": 89.33
+  },
+  "Friends03/Friends.S03E11.The.One.Where.Chandler.Can't.Remember.Which.Sister.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 103.15,
+    "intro_end": 150.55
+  },
+  "Friends03/Friends.S03E12.The.One.with.All.the.Jealousy.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 110.12,
+    "intro_end": 155.53
+  },
+  "Friends03/Friends.S03E13.The.One.Where.Monica.and.Richard.Are.Just.Friends.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 70.55,
+    "intro_end": 117.85
+  },
+  "Friends03/Friends.S03E14.The.One.with.Phoebe's.Ex-Partner.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 77.7,
+    "intro_end": 125.08
+  },
+  "Friends03/Friends.S03E15.The.One.Where.Ross.and.Rachel.Take.a.Break.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 101.15,
+    "intro_end": 148.07
+  },
+  "Friends03/Friends.S03E16.The.One.the.Morning.After.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 137.22,
+    "intro_end": 182.55
+  },
+  "Friends03/Friends.S03E17.The.One.Without.the.Ski.Trip.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 137.68,
+    "intro_end": 185.03
+  },
+  "Friends03/Friends.S03E18.The.One.with.the.Hypnosis.Tape.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 120.38,
+    "intro_end": 167.38
+  },
+  "Friends03/Friends.S03E19.The.One.with.the.Tiny.T-Shirt.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 70.05,
+    "intro_end": 117.33
+  },
+  "Friends03/Friends.S03E20.The.One.with.the.Dollhouse.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 101.85,
+    "intro_end": 149.12
+  },
+  "Friends03/Friends.S03E21.The.One.with.the.Chick.and.the.Duck.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 30.15,
+    "intro_end": 75.5
+  },
+  "Friends03/Friends.S03E22.The.One.with.the.Screamer.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 118.85,
+    "intro_end": 164.2
+  },
+  "Friends03/Friends.S03E23.The.One.with.Ross's.Thing.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 81.25,
+    "intro_end": 128.65
+  },
+  "Friends03/Friends.S03E24.The.One.with.the.Ultimate.Fighting.Champion.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 129.22,
+    "intro_end": 176.65
+  },
+  "Friends03/Friends.S03E25.The.One.at.the.Beach.720p.BluRay.2CH.x265.HEVC-PSA.mkv": {
+    "intro_start": 90.12,
+    "intro_end": 137.53
+  },
+  "TopGear05/Top Gear - [05x01] - 2004.10.24 [VFUA].avi": {
+    "intro_start": null,
+    "intro_end": null
+  },
+  "TopGear05/Top Gear - [05x02] - 2004.10.31 [VFUA].avi": {
+    "intro_start": null,
+    "intro_end": null,
+    "outro_start": 3545.86
+  },
+  "TopGear05/Top Gear - [05x03] - 2004.11.07 [VFUA].avi": {
+    "intro_start": null,
+    "intro_end": null,
+    "outro_start": 3509.08
+  },
+  "TopGear05/Top Gear - [05x04] - 2004.11.14 [VFUA].avi": {
+    "intro_start": null,
+    "intro_end": null,
+    "outro_start": 3548.82
+  },
+  "TopGear05/Top Gear - [05x05] - 2004.11.21 [VFUA].avi": {
+    "intro_start": null,
+    "intro_end": null
+  },
+  "TopGear05/Top Gear - [05x06] - 2004.12.05 [m00tv].avi": {
+    "intro_start": null,
+    "intro_end": null,
+    "outro_start": 3545.98
+  },
+  "TopGear05/Top Gear - [05x07] - 2004.12.12 [PiXTV].avi": {
     "intro_start": null,
     "intro_end": null
   }
