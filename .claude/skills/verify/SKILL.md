@@ -32,3 +32,17 @@ Gotchas:
 - First-ever read of the mkvs can stall (iCloud materialization); a cold
   run may take minutes in probe/boundaries stages.
 - Full run ≈ 1–4 min; encoding 21 mp3s dominates.
+
+## Detection benchmark
+
+```bash
+.venv/bin/python tools/bench_detection.py            # all seasons under test_media/
+.venv/bin/python tools/bench_detection.py --season "Season 02"
+```
+
+Compares `pipeline.detect` to `tools/ground_truth.json` (seconds; `null` =
+boundary does not exist). Read the summary block: "clipped dialogue" must be 0
+and "no-intro episodes cut anyway" must be 0 before a detection change ships.
+Bootstrap new truth entries with
+`tvshow-noisemaker -i <season> -o /tmp/x --detect-only plan.json`, then
+verify each cut by ear and copy the corrected numbers in.

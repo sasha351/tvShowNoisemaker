@@ -1,0 +1,7 @@
+{
+  "_comment": "Hand-verified cut points in seconds, keyed by path relative to test_media/. null = that boundary does not exist (no intro / no credits). Omit a key to leave it unchecked. Bootstrap entries with --detect-only, then verify by ear.",
+  "Season 02/Family Guy - S02E13 - Road to Rhode Island (Uncensored).mkv": {
+    "intro_start": null,
+    "intro_end": null
+  }
+}
