@@ -33,8 +33,12 @@ def is_file_result(line: str) -> bool:
 
 
 def output_subdir_for(source_folder: str, dest_root: str) -> str:
-    """Per-source-folder output path: <dest_root>/<basename(source_folder)>."""
-    return str(Path(dest_root) / Path(source_folder).name)
+    """Per-source-folder output path: <dest_root>/<basename(source_folder)> (Audio).
+
+    The " (Audio)" suffix keeps converts out of the source folder when the
+    destination is the source's parent (e.g. shows sitting in ~/Downloads).
+    """
+    return str(Path(dest_root) / f"{Path(source_folder).name} (Audio)")
 
 
 def basename_collisions(folders: list[str]) -> list[str]:

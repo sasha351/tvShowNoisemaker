@@ -29,7 +29,12 @@ def test_is_file_result_done_skipped_failed():
 
 
 def test_output_subdir_for_joins_basename():
-    assert output_subdir_for("/videos/The Office", "/out") == "/out/The Office"
+    assert output_subdir_for("/videos/The Office", "/out") == "/out/The Office (Audio)"
+
+
+def test_output_subdir_never_equals_source_folder():
+    """Destination == source's parent must not write converts next to the videos."""
+    assert output_subdir_for("/videos/The Office", "/videos") != "/videos/The Office"
 
 
 def test_basename_collisions_detects_duplicates():
