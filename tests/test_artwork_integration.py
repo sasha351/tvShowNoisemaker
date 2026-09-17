@@ -12,7 +12,7 @@ import pytest
 from tvshow_noisemaker.artwork import resolve_artwork
 from tvshow_noisemaker.processor import process_file
 
-_TEST_MEDIA = Path(__file__).resolve().parent.parent / "test_media" / "Season 02"
+_TEST_MEDIA = Path(__file__).resolve().parent.parent / "test_media" / "FamilyGuy02"
 
 needs_media = pytest.mark.skipif(
     shutil.which("ffmpeg") is None
