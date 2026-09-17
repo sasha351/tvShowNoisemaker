@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 
 from tvshow_noisemaker.detector import (
+    MatchInfo,
+    SeasonConsensus,
     _coalesce,
+    _consensus_segments,
     _detect_by_chromaprint,
     _compare_episodes_chromaprint,
     _create_inverted_index,
@@ -19,7 +22,7 @@ from tvshow_noisemaker.detector import (
     _find_contiguous_range,
     _match_template_position,
     _otsu_threshold,
-    _pairwise_best_segments,
+    _pairwise_matches,
     _popcount32,
     _frame_similarity,
     _refine_results_with_silence,
@@ -27,6 +30,7 @@ from tvshow_noisemaker.detector import (
     _snap_to_silence,
     detect_by_silence,
     get_duration,
+    get_last_consensus,
     resolve_boundaries,
 )
 from tvshow_noisemaker.config import Config
@@ -684,8 +688,7 @@ def test_compare_episodes_chromaprint_too_short():
     assert lr is None and rr is None
 
 
-def test_pairwise_best_segments_keeps_longest():
-    """Each episode keeps the longest segment found across all its pairs."""
+def test_pairwise_matches_returns_every_match():
     fps = {
         "a": np.array([1], dtype=np.uint32),
         "b": np.array([2], dtype=np.uint32),
@@ -695,21 +698,71 @@ def test_pairwise_best_segments_keeps_longest():
     table = {
         ("a", "b"): ((0.0, 20.0), (0.0, 20.0)),
         ("a", "c"): ((0.0, 30.0), (0.0, 30.0)),
-        ("b", "c"): ((0.0, 25.0), (5.0, 28.0)),
+        ("b", "c"): (None, None),
     }
 
     def _fake(lhs, rhs, min_dur, max_dur):
         return table[(names[int(lhs[0])], names[int(rhs[0])])]
 
-    with patch(
-        "tvshow_noisemaker.detector._compare_episodes_chromaprint",
-        side_effect=_fake,
-    ):
-        segs = _pairwise_best_segments(fps, ["a", "b", "c"], 15.0, 120.0, max_workers=2)
+    with patch("tvshow_noisemaker.detector._compare_episodes_chromaprint", side_effect=_fake):
+        matches = _pairwise_matches(fps, ["a", "b", "c"], 15.0, 120.0, max_workers=2)
 
-    assert segs["a"] == (0.0, 30.0)   # longest of 20s (vs b) and 30s (vs c)
-    assert segs["b"] == (0.0, 25.0)   # longest of 20s (vs a) and 25s (vs c)
-    assert segs["c"] == (0.0, 30.0)   # longest of 30s (vs a) and 23s (vs b)
+    assert matches == [
+        ("a", (0.0, 20.0), "b", (0.0, 20.0)),
+        ("a", (0.0, 30.0), "c", (0.0, 30.0)),
+    ]
+
+
+def _theme(a, b, start_a=0.0, start_b=0.0, length=30.0):
+    return (a, (start_a, start_a + length), b, (start_b, start_b + length))
+
+
+def test_consensus_prefers_the_length_most_episodes_share_over_a_longer_recap():
+    """a–b share a 45 s recap (longest match of that pair); everyone shares a 30 s theme."""
+    matches = [
+        _theme("a", "b", length=45.0),  # recap: the a–b pair's longest match hides the theme
+        _theme("a", "c"), _theme("a", "d"), _theme("b", "c"), _theme("b", "d"), _theme("c", "d"),
+    ]
+    c = _consensus_segments(matches, n_episodes=4)
+    assert c.median_len == 30.0
+    assert c.segments == {"a": (0.0, 30.0), "b": (0.0, 30.0), "c": (0.0, 30.0), "d": (0.0, 30.0)}
+    assert c.support == {"a": 2, "b": 2, "c": 3, "d": 3}
+    assert c.outliers == {"a": [45.0], "b": [45.0]}
+
+
+def test_consensus_uses_median_of_an_episodes_cluster_matches():
+    matches = [_theme("a", "b", start_a=10.0), _theme("a", "c", start_a=12.0), _theme("a", "d", start_a=11.0), _theme("b", "c"), _theme("b", "d"), _theme("c", "d")]
+    c = _consensus_segments(matches, n_episodes=4)
+    assert c.segments["a"] == (11.0, 41.0)
+
+
+def test_consensus_tolerance_groups_lengths_within_three_seconds():
+    matches = [_theme("a", "b", length=30.0), _theme("a", "c", length=32.5), _theme("b", "c", length=27.5)]
+    c = _consensus_segments(matches, n_episodes=3)
+    assert c.support == {"a": 2, "b": 2, "c": 2}
+    assert c.outliers == {}
+
+
+def test_consensus_tie_goes_to_the_longer_cluster():
+    matches = [_theme("a", "b", length=20.0), _theme("c", "d", length=40.0)]
+    c = _consensus_segments(matches, n_episodes=4)
+    assert c.median_len == 40.0
+    assert set(c.segments) == {"c", "d"}
+    assert c.outliers == {"a": [20.0], "b": [20.0]}
+
+
+def test_consensus_needs_a_third_of_the_season():
+    """One pair in a nine-episode season is not a season intro (needs max(2, ceil(9/3)) = 3 episodes)."""
+    matches = [_theme("a", "b", length=40.0)]
+    c = _consensus_segments(matches, n_episodes=9)
+    assert c.median_len is None
+    assert c.segments == {} and c.support == {}
+    assert c.outliers == {"a": [40.0], "b": [40.0]}
+
+
+def test_consensus_empty():
+    c = _consensus_segments([], n_episodes=5)
+    assert c.median_len is None and c.segments == {} and c.outliers == {}
 
 
 def test_find_contiguous_at_shift_matching():
@@ -758,6 +811,41 @@ def test_detect_by_chromaprint_parallel_extraction_deterministic_order():
 
     assert max_active > 1
     assert list(results.keys()) == filepaths
+    assert results[filepaths[0]] == (0.0, 30.0, 1800.0 - 30.0)
+    consensus = get_last_consensus()
+    assert consensus.intro_len == 30.0 and consensus.outro_len == 30.0
+    assert consensus.intro_episodes == 4 and consensus.outro_episodes == 4
+    assert consensus.episodes[filepaths[0]] == MatchInfo(
+        intro_support=3, outro_support=3, intro_len=30.0, outro_len=30.0, intro_outliers=[], outro_outliers=[],
+    )
+
+
+def test_detect_by_chromaprint_does_not_fill_unmatched_episodes():
+    filepaths = [f"/show/ep{i:02d}.mp4" for i in range(1, 4)]
+    durations = {fp: 1800.0 for fp in filepaths}
+
+    def _fake_extract(fp, start, _duration):
+        # Intro fingerprints are 1/2/3, outro fingerprints 101/102/103, so the fake
+        # compare can tell passes and episodes apart without depending on call order.
+        ep = int(fp[-6:-4])
+        return np.full(200, ep if start < 0.5 else 100 + ep, dtype=np.uint32), False
+
+    def _fake_compare(lhs, rhs, min_dur, max_dur):
+        # Only ep01–ep02 share an intro; nothing shares credits.
+        return ((0.0, 30.0), (0.0, 30.0)) if (int(lhs[0]), int(rhs[0])) == (1, 2) else (None, None)
+
+    with (
+        patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=_fake_extract),
+        patch("tvshow_noisemaker.detector._compare_episodes_chromaprint", side_effect=_fake_compare),
+    ):
+        results = _detect_by_chromaprint(filepaths, durations)
+
+    assert results[filepaths[0]] == (0.0, 30.0, None)
+    assert results[filepaths[1]] == (0.0, 30.0, None)
+    assert results[filepaths[2]] == (None, None, None)          # present, not median-filled
+    c = get_last_consensus()
+    assert c.intro_len == 30.0 and c.outro_len is None
+    assert c.episodes[filepaths[2]].intro_support == 0
 
 
 # ---------------------------------------------------------------------------

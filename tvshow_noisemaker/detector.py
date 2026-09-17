@@ -27,11 +27,12 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -104,6 +105,121 @@ def _set_last_fingerprint_stats(stats: FingerprintStats) -> None:
 def get_last_fingerprint_stats() -> Dict[str, float]:
     """Return runtime statistics from the last fingerprinting pass."""
     return asdict(_LAST_FINGERPRINT_STATS)
+
+
+# ── Season consensus ────────────────────────────────────────────────────────
+
+_CONSENSUS_TOLERANCE = 3.0  # seconds; pair matches within this of a cluster centre vote together
+
+PairMatch = Tuple[str, Tuple[float, float], str, Tuple[float, float]]
+
+
+@dataclass
+class MatchInfo:
+    """How strongly one episode supports the season consensus."""
+
+    intro_support: int = 0            # pair matches inside the winning intro cluster
+    outro_support: int = 0
+    intro_len: Optional[float] = None  # this episode's raw (pre-snap) matched intro length
+    outro_len: Optional[float] = None
+    intro_outliers: List[float] = field(default_factory=list)  # lengths of ignored intro matches (recaps…)
+    outro_outliers: List[float] = field(default_factory=list)
+
+
+@dataclass
+class SeasonConsensus:
+    """What the season agrees on: shared intro/credits length and who supports it."""
+
+    intro_len: Optional[float] = None  # median length of the winning intro cluster; None = no shared intro
+    outro_len: Optional[float] = None  # same for credits, measured from the end of the file
+    intro_episodes: int = 0            # episodes covered by the winning cluster
+    outro_episodes: int = 0
+    episodes: Dict[str, MatchInfo] = field(default_factory=dict)
+
+
+# ponytail: same module-level side channel as the fingerprint stats; the
+# public detect_by_fingerprinting() return type stays a plain dict.
+_last_consensus = SeasonConsensus()
+
+
+def _set_last_consensus(consensus: SeasonConsensus) -> None:
+    global _last_consensus
+    _last_consensus = consensus
+
+
+def get_last_consensus() -> SeasonConsensus:
+    """Consensus published by the most recent Chromaprint pass."""
+    return _last_consensus
+
+
+@dataclass
+class _Consensus:
+    segments: Dict[str, Tuple[float, float]] = field(default_factory=dict)  # per-episode segment in the winning cluster
+    support: Dict[str, int] = field(default_factory=dict)                   # cluster matches per episode
+    outliers: Dict[str, List[float]] = field(default_factory=dict)          # ignored match lengths per episode
+    median_len: Optional[float] = None                                       # None = no consensus
+
+
+def _consensus_segments(
+    matches: List[PairMatch], n_episodes: int, tolerance: float = _CONSENSUS_TOLERANCE,
+) -> _Consensus:
+    """Pick the shared-segment length most episodes agree on, and each episode's segment in it.
+
+    Every pair match votes once per side with its length.  Distinct lengths
+    are grouped into runs by single-linkage: consecutive lengths (sorted)
+    join the same run while the gap between them is within *tolerance*, so a
+    run can span more than *tolerance* end-to-end when chained through an
+    intermediate vote.  The winning run covers the most episodes (ties →
+    longer) and must cover ``max(2, ceil(n_episodes / 3))`` of them, otherwise
+    the season has no consensus.  An episode's segment is the median of its
+    run votes; votes outside the run (recaps, two-parters, shared cues) are
+    returned as outlier lengths so callers can flag them.
+    """
+    out = _Consensus()
+    votes = []  # (length, episode, segment)
+    for a, seg_a, b, seg_b in matches:
+        votes.append((seg_a[1] - seg_a[0], a, seg_a))
+        votes.append((seg_b[1] - seg_b[0], b, seg_b))
+    if not votes:
+        return out
+
+    # Group vote lengths into runs by single-linkage: sort the distinct
+    # lengths and cut wherever the gap to the previous one exceeds
+    # tolerance. A run can span more than `tolerance` end-to-end when
+    # chained by an intermediate vote (e.g. 27.5–30–32.5 at tolerance=3);
+    # a plain "within tolerance of one centre" scan under-covers that case.
+    # ponytail: O(n log n) sort + linear scan, fine at season-sized vote counts.
+    runs: List[List[float]] = []
+    for length in sorted({v[0] for v in votes}):
+        if runs and length - runs[-1][-1] <= tolerance:
+            runs[-1].append(length)
+        else:
+            runs.append([length])
+
+    best_run: List[float] = []
+    best_cover = 0
+    for run in sorted(runs, key=lambda r: r[-1], reverse=True):  # longer first so ties keep the longer
+        run_set = set(run)
+        cover = len({ep for length, ep, _ in votes if length in run_set})
+        if cover > best_cover:
+            best_run, best_cover = run, cover
+    if best_cover < max(2, math.ceil(n_episodes / 3)):
+        for length, ep, _ in votes:
+            out.outliers.setdefault(ep, []).append(round(length, 1))
+        return out
+
+    best_set = set(best_run)
+    by_ep: Dict[str, List[Tuple[float, float]]] = {}
+    for length, ep, seg in votes:
+        if length in best_set:
+            by_ep.setdefault(ep, []).append(seg)
+        else:
+            out.outliers.setdefault(ep, []).append(round(length, 1))
+    out.median_len = float(np.median([length for length, _, _ in votes if length in best_set]))
+    for ep, segs in by_ep.items():
+        out.segments[ep] = (float(np.median([s[0] for s in segs])), float(np.median([s[1] for s in segs])))
+        out.support[ep] = len(segs)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -788,19 +904,16 @@ def _compare_episodes_chromaprint(
     return best_lhs, best_rhs
 
 
-def _pairwise_best_segments(
+def _pairwise_matches(
     fps: Dict[str, np.ndarray],
     paths: List[str],
     min_dur: float,
     max_dur: float,
     max_workers: int,
-) -> Dict[str, Tuple[float, float]]:
-    """Compare every episode pair; keep the longest matching segment per episode.
+) -> List[PairMatch]:
+    """Compare every episode pair; return every match as ``(a, (a0, a1), b, (b0, b1))``.
 
-    All pair comparisons were already being computed by the previous
-    first-match strategy — this keeps the same work but uses every result.
-    Deterministic: pairs are processed in submission order and ties keep
-    the earlier pair's segment.
+    Deterministic: pairs are compared in submission order.
     """
     pairs = [(a, b) for i, a in enumerate(paths) for b in paths[i + 1:]]
 
@@ -814,16 +927,12 @@ def _pairwise_best_segments(
             logger.debug("Chromaprint compare failed for %s vs %s: %s", a, b, exc)
             return pair, (None, None)
 
-    segments: Dict[str, Tuple[float, float]] = {}
+    matches: List[PairMatch] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         for (a, b), (lr, rr) in pool.map(_compare, pairs):
-            if lr is None or rr is None:
-                continue
-            if a not in segments or (lr[1] - lr[0]) > (segments[a][1] - segments[a][0]):
-                segments[a] = lr
-            if b not in segments or (rr[1] - rr[0]) > (segments[b][1] - segments[b][0]):
-                segments[b] = rr
-    return segments
+            if lr is not None and rr is not None:
+                matches.append((a, lr, b, rr))
+    return matches
 
 
 # ── Chromaprint orchestrator ────────────────────────────────────────────────
@@ -849,6 +958,7 @@ def _detect_by_chromaprint(
         logger.info("Chromaprint requires ≥2 files; got %d. Skipping.", len(filepaths))
         stats.elapsed_sec = time.monotonic() - start_time
         _set_last_fingerprint_stats(stats)
+        _set_last_consensus(SeasonConsensus())
         return {}
 
     intro_fps: Dict[str, np.ndarray] = {}
@@ -868,6 +978,7 @@ def _detect_by_chromaprint(
         stats.valid_files = len(extraction_jobs)
         stats.elapsed_sec = time.monotonic() - start_time
         _set_last_fingerprint_stats(stats)
+        _set_last_consensus(SeasonConsensus())
         return {}
 
     def _extract_for_file(job: Tuple[int, str, float]) -> Tuple[int, str, Optional[np.ndarray], Optional[np.ndarray], int, int]:
@@ -920,72 +1031,62 @@ def _detect_by_chromaprint(
         stats.valid_files = len(valid_paths)
         stats.elapsed_sec = time.monotonic() - start_time
         _set_last_fingerprint_stats(stats)
+        _set_last_consensus(SeasonConsensus())
         return {}
 
     stats.valid_files = len(valid_paths)
 
-    # ── Intro/outro detection: pairwise comparison, longest match wins ──
-    intro_segments = _pairwise_best_segments(
-        intro_fps, valid_paths, min_segment, max_segment, max_workers,
+    # ── Intro/outro detection: season consensus over every pair match ──
+    intro = _consensus_segments(
+        _pairwise_matches(intro_fps, valid_paths, min_segment, max_segment, max_workers),
+        len(valid_paths),
     )
-    outro_segments = _pairwise_best_segments(
-        outro_fps, valid_paths, min_segment, max(max_segment, search_window), max_workers,
+    outro = _consensus_segments(
+        _pairwise_matches(outro_fps, valid_paths, min_segment, max(max_segment, search_window), max_workers),
+        len(valid_paths),
+    )
+    consensus = SeasonConsensus(
+        intro_len=intro.median_len, outro_len=outro.median_len,
+        intro_episodes=len(intro.segments), outro_episodes=len(outro.segments),
     )
 
-    # ── Assemble per-episode results ──
+    # ── Assemble per-episode results: None where this episode did not match ──
     results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
-
-    for fp in filepaths:
-        dur = durations.get(fp)
-        if dur is None:
-            continue
-
-        is_: Optional[float] = intro_segments[fp][0] if fp in intro_segments else None
-        ie: Optional[float] = intro_segments[fp][1] if fp in intro_segments else None
-
+    for fp in valid_paths:
+        dur = durations[fp]
+        is_: Optional[float] = None
+        ie: Optional[float] = None
         os_: Optional[float] = None
-        if fp in outro_segments:
+        if fp in intro.segments:
+            is_, ie = intro.segments[fp]
+        if fp in outro.segments:
             # Convert reversed-fingerprint coordinates back to absolute time.
-            os_ = dur - outro_segments[fp][1]
+            os_ = dur - outro.segments[fp][1]
             if ie is not None and os_ < ie:
                 os_ = ie
-
-        if is_ is not None or ie is not None or os_ is not None:
-            results[fp] = (is_, ie, os_)
-            logger.debug(
-                "Chromaprint result for %s: intro=%.1fs–%.1fs, outro=%.1fs",
-                Path(fp).name,
-                is_ if is_ is not None else 0.0,
-                ie if ie is not None else 0.0,
-                os_ if os_ is not None else dur,
-            )
-
-    # ── Fill episodes that had no individual match with median values ──
-    if results:
-        ie_vals = [r[1] for r in results.values() if r[1] is not None]
-        is_vals = [r[0] for r in results.values() if r[0] is not None]
-        med_is = float(np.median(is_vals)) if is_vals else None
-        med_ie = float(np.median(ie_vals)) if ie_vals else None
-
-        os_from_end = [
-            durations[fp2] - results[fp2][2]
-            for fp2 in results
-            if results[fp2][2] is not None and fp2 in durations
-        ]
-        med_os_from_end = float(np.median(os_from_end)) if os_from_end else None
-
-        for fp in filepaths:
-            dur = durations.get(fp)
-            if dur is None or fp in results:
-                continue
-            os_val = (dur - med_os_from_end) if med_os_from_end is not None else None
-            if os_val is not None and med_ie is not None and os_val < med_ie:
-                os_val = med_ie
-            results[fp] = (med_is, med_ie, os_val)
+        results[fp] = (is_, ie, os_)
+        consensus.episodes[fp] = MatchInfo(
+            intro_support=intro.support.get(fp, 0),
+            outro_support=outro.support.get(fp, 0),
+            intro_len=(ie - is_) if ie is not None and is_ is not None else None,
+            outro_len=(dur - os_) if os_ is not None else None,
+            intro_outliers=intro.outliers.get(fp, []),
+            outro_outliers=outro.outliers.get(fp, []),
+        )
+        logger.debug(
+            "Chromaprint result for %s: intro=%.1fs–%.1fs, outro=%.1fs",
+            Path(fp).name,
+            is_ if is_ is not None else 0.0,
+            ie if ie is not None else 0.0,
+            os_ if os_ is not None else dur,
+        )
+    _set_last_consensus(consensus)
 
     logger.info(
-        "Chromaprint: %d intro(s), %d outro(s) detected across %d files",
-        len(intro_segments), len(outro_segments), len(valid_paths),
+        "Chromaprint: %d intro(s), %d outro(s) detected across %d files (season intro %s, credits %s)",
+        len(intro.segments), len(outro.segments), len(valid_paths),
+        f"{intro.median_len:.1f}s" if intro.median_len is not None else "none",
+        f"{outro.median_len:.1f}s" if outro.median_len is not None else "none",
     )
 
     stats.elapsed_sec = time.monotonic() - start_time
