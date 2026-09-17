@@ -133,6 +133,8 @@ This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight
 | `--benchmark-fingerprint` | off | Print fingerprint timing/cache stats |
 | `--verbose`, `-v` | off | Debug terminal logs |
 | `--log-file` | auto | Override log file path |
+| `--detect-only` | none | Write the per-episode plan (cut points) as JSON and stop; no encoding |
+| `--plan` | none | Encode from a plan JSON produced by `--detect-only` (skips detection) |
 
 ## Config File
 
