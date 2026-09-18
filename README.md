@@ -1,6 +1,6 @@
 # tvShowNoisemaker
 
-Version: 1.1.0
+Version: 2.0.0
 
 `tvshow-noisemaker` trims TV intros/outros from episode video files and exports tagged MP3s.
 
@@ -105,9 +105,13 @@ For a no-terminal workflow, launch the bundled desktop GUI instead:
 tvshow-noisemaker-gui
 ```
 
-Add one or more source folders (videos) and pick a destination folder (MP3s), then click Start. Each source folder is processed in turn, writing its MP3s into a subfolder of the destination named after that source folder (to avoid collisions between shows). The GUI runs the same CLI underneath and streams its log output live, with a progress bar and status line showing which folder is currently processing. Click Cancel to stop the whole batch early. There are no options beyond source/destination — for bitrate, workers, fingerprinting, or config-file control, use the CLI directly.
+Add one or more source folders (videos) and pick a destination folder, choose a format and quality, then click Start. Each source folder is processed in turn, writing its output into a subfolder of the destination named after that source folder (to avoid collisions between shows). Detection and encoding run in-process: as soon as one folder's plan is ready, its confident episodes start encoding right away, while the next folder is still being detected.
 
-Built entirely on tkinter (Python stdlib) — no extra install required.
+Episodes the detector isn't confident about (no intro/credits match, a credits-length mismatch, etc.) land in a review panel instead of encoding automatically — tick "Review every episode" before Start to route every episode there regardless. Each flagged row shows the episode name, the reason it was flagged, and three editable time fields (`m:ss.s`, e.g. `1:23.4`) for intro start, intro end and credits start. A ▶ button next to each field plays 6 seconds of audio centered on that time so you can check the cut by ear (■ stops playback). Tick "Skip" to leave an episode out of the export instead of fixing its times. Approve queues that one episode for encoding — editing a time first re-tags the episode `manual`/`high`; "Approve all" does the same for every row still on the panel, stopping at the first one that's still incomplete (blank field, Skip not ticked). "Export approved cuts…" writes everything approved so far to a plan JSON file that the CLI's `--plan` flag accepts, without encoding anything itself.
+
+Click Cancel (the Start button relabels itself once running) to stop the whole batch: in-flight and queued encodes are dropped and the review panel is cleared. For workers, fingerprinting, or config-file control, use the CLI directly.
+
+Built on customtkinter, installed automatically as a project dependency — no separate setup beyond installing the package.
 
 ### Desktop App Shortcut
 

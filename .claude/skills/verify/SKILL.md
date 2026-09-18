@@ -67,3 +67,18 @@ E10 review ("no credits match", credits `outro_start` undetected), E11 review
 25 high, flag "no shared credits found in this season" (credits are 6–12 s, below
 the 15 s match floor); TopGear05 — no intro in the season (intro_end 0.0),
 3 episodes with credits high, 4 review ("no credits match").
+
+## GUI check
+
+The GUI (`tvshow_noisemaker/gui.py`) runs detection and encoding in-process, not
+by shelling out to the CLI, so it needs its own pass: `.venv/bin/python -m
+tvshow_noisemaker.gui`, add `test_media/FamilyGuy02` and `test_media/TopGear05`
+as source folders, a scratch destination, format m4a, click Start. Expect
+Family Guy's confident episodes to start encoding while Top Gear is still
+detecting (folder pipelining). The review panel should show Family Guy
+S02E05/E10/E11/E13/E20 and Top Gear 05x01/02/05/07 — not all Top Gear rows;
+05x03/04/06 come back `confidence="high"` with nothing flagged and encode
+straight through. `▶` plays 6 s of audio centered on the field's cut time;
+approving a row after editing one of its times encodes it. Cancel mid-encode
+should leave `pgrep ffmpeg | wc -l` at 0 within a second of the click — macOS
+`pgrep` has no `-c` flag, pipe to `wc -l` instead.
