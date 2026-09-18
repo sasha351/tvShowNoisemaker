@@ -13,7 +13,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
@@ -33,7 +32,7 @@ _POLL_MS = 100
 _FORMATS = ("mp3", "m4a", "flac", "wav")
 _LOSSLESS_FORMATS = ("flac", "wav")
 _BITRATES = ("128", "192", "256", "320")
-_FLUSH = ("flush",)  # encode-queue sentinel: detection finished (or the batch was cancelled)
+_STOP = ("stop",)  # encode-queue sentinel: the Tk thread says no more jobs are coming
 _FIELDS = (("intro_start", "Intro start"), ("intro_end", "Intro end"), ("outro_start", "Credits start"))
 
 
@@ -75,6 +74,34 @@ def format_eta(seconds: float) -> str:
 
 
 @dataclass
+class _Batch:
+    """Everything one run owns.  Workers are handed this and never touch ``App``.
+
+    Replacing it (a new run, or a cancel) is what makes a worker that outlived its
+    batch harmless: its messages carry an ``id`` the Tk thread no longer listens to.
+    """
+
+    id: int
+    fmt: str = "mp3"
+    bitrate: str = "256"
+    q: "queue.Queue" = field(default_factory=queue.Queue)      # (batch id, message) to the Tk thread
+    jobs: "queue.Queue" = field(default_factory=queue.Queue)   # encode jobs, Tk thread -> encode worker
+    cancel: threading.Event = field(default_factory=threading.Event)
+    detect_done: threading.Event = field(default_factory=threading.Event)
+
+    def cfg(self, workers: int | None = None) -> Config:
+        return Config(output_format=self.fmt, mp3_bitrate=int(self.bitrate), workers=workers)
+
+    def post(self, *msg) -> None:
+        self.q.put((self.id, msg))
+
+    def progress_for(self, folder: str):
+        def _progress(stage: str, done: int, total: int, message: str) -> None:
+            self.post("progress", folder, stage, done, total, message)
+        return _progress
+
+
+@dataclass
 class _Row:
     """One review-panel row: the episode plus the widgets holding the user's edits."""
 
@@ -82,7 +109,7 @@ class _Row:
     episode: EpisodePlan
     frame: "ctk.CTkFrame"
     skip_var: tk.BooleanVar
-    entries: Dict[str, "ctk.CTkEntry"] = field(default_factory=dict)
+    entries: dict[str, "ctk.CTkEntry"] = field(default_factory=dict)
 
 
 class App:
@@ -92,28 +119,28 @@ class App:
         root.geometry("640x760")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.q: "queue.Queue[tuple]" = queue.Queue()
-        self.encode_jobs: "queue.Queue" = queue.Queue()
-        self.cancel = threading.Event()
+        self.batch = _Batch(id=0)
         self.player = SnippetPlayer()
 
         self.src_folders: list[str] = []
-        self.review_rows: List[_Row] = []
-        self.approved: Dict[str, List[EpisodePlan]] = {}
+        self.review_rows: list[_Row] = []
+        self.approved: dict[str, list[EpisodePlan]] = {}
         self.running = False
         self.cancelling = False
         self._detect_done = True
-        self._folder_index: Dict[str, int] = {}
+        self._jobs_in_flight = 0
+        self._folder_index: dict[str, int] = {}
         self._total_folders = 0
-        self._last_folder: Optional[str] = None
+        self._last_folder: str | None = None
         self._enc_done = 0
         self._enc_total = 0
-        self._enc_t0: Optional[float] = None
-        self._handler: Optional[QueueHandler] = None
+        self._enc_t0: float | None = None
+        self._handler: QueueHandler | None = None
+        self._prev_level: int | None = None
         self._folder_row_buttons: list[ctk.CTkButton] = []
         self._details_shown = False
         self._review_shown = False
-        self._fmt, self._bitrate, self._dst, self._review_all = "mp3", "256", "", False
+        self._dst, self._review_all = "", False
 
         frm = ctk.CTkFrame(root, fg_color="transparent")
         frm.pack(fill="both", expand=True, padx=20, pady=20)
@@ -135,6 +162,11 @@ class App:
 
         self.dst.trace_add("write", self._update_start_state)
         self._update_start_state()
+
+    # The current batch's queues; workers use their own _Batch, never these.
+    q = property(lambda self: self.batch.q)
+    encode_jobs = property(lambda self: self.batch.jobs)
+    _batch = property(lambda self: self.batch.id)
 
     # -- Shows -----------------------------------------------------------
 
@@ -380,12 +412,10 @@ class App:
         self._drop_row(row)
         self.approved.setdefault(row.folder, []).append(ep)
         self._last_folder = row.folder
-        self._enc_total += 1
-        self.encode_jobs.put((
-            row.folder,
-            Plan(input_dir=row.folder, episodes=[ep]),
-            output_subdir_for(row.folder, self._dst),
-        ))
+        if not review_row.skip:
+            self._enc_total += 1  # a skipped episode is never converted: keep it out of the ETA
+        self._enqueue(row.folder, Plan(input_dir=row.folder, episodes=[ep]))
+        self._maybe_finish()
         return True
 
     def _approve_all(self) -> None:
@@ -420,18 +450,19 @@ class App:
             ok = bool(self.src_folders) and bool(self.dst.get())
             self.start_btn.configure(state="normal" if ok else "disabled")
 
-    def _cfg(self, workers: Optional[int] = None) -> Config:
-        return Config(output_format=self._fmt, mp3_bitrate=int(self._bitrate), workers=workers)
+    def _enqueue(self, folder: str, plan: Plan) -> None:
+        """Tk thread only: hand one job to the encode worker and count it as in flight."""
+        self._jobs_in_flight += 1
+        self.batch.jobs.put((folder, plan, output_subdir_for(folder, self._dst)))
 
-    def _encode_cfg(self) -> Config:
-        # Leave cores for detection while it is still running; take them all afterwards.
-        cpu = os.cpu_count() or 2
-        return self._cfg(None if self._detect_done else max(1, cpu - cpu // 2))
+    def _maybe_finish(self) -> None:
+        """Tk thread only, and the only decider that a batch is over.
 
-    def _progress_for(self, folder: str):
-        def _progress(stage: str, done: int, total: int, message: str) -> None:
-            self.q.put(("progress", folder, stage, done, total, message))
-        return _progress
+        The encode worker cannot make this call: it would have to read review_rows
+        (Tk-owned) and race the approval that is about to enqueue the next job.
+        """
+        if self._detect_done and not self.review_rows and self._jobs_in_flight == 0:
+            self.batch.jobs.put(_STOP)
 
     def _start_or_cancel(self) -> None:
         if self.running:
@@ -442,21 +473,20 @@ class App:
     def _begin_batch(self, start_threads: bool = True) -> None:
         """Reset state, install the log relay and (optionally) start the workers."""
         folders = list(self.src_folders)
-        self.cancel = threading.Event()
-        self.encode_jobs = queue.Queue()
-        self.q = queue.Queue()
+        batch = self.batch = _Batch(
+            id=self.batch.id + 1, fmt=self.output_format.get(), bitrate=self.bitrate.get(),
+        )
         self.review_rows = []
         self.approved = {}
         self.running = True
         self.cancelling = False
         self._detect_done = False
+        self._jobs_in_flight = 0
         self._folder_index = {f: i + 1 for i, f in enumerate(folders)}
         self._total_folders = len(folders)
         self._last_folder = None
         self._enc_done = self._enc_total = 0
         self._enc_t0 = None
-        self._fmt = self.output_format.get()
-        self._bitrate = self.bitrate.get()
         self._dst = self.dst.get()
         self._review_all = bool(self.review_all.get())
         self._clear_review()
@@ -470,80 +500,96 @@ class App:
         for btn in self._folder_row_buttons:
             btn.configure(state="disabled")
 
-        self._handler = QueueHandler(self.q)
+        self._handler = QueueHandler(batch.q)
         self._handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         self._handler.setLevel(logging.INFO)
         lib_log = logging.getLogger("tvshow_noisemaker")
+        self._prev_level = lib_log.level
         lib_log.setLevel(logging.INFO)
         lib_log.addHandler(self._handler)
 
         if start_threads:
-            threading.Thread(target=self._detect_worker, args=(folders,), daemon=True).start()
-            threading.Thread(target=self._encode_worker, daemon=True).start()
+            threading.Thread(target=self._detect_worker, args=(batch, folders), daemon=True).start()
+            threading.Thread(target=self._encode_worker, args=(batch,), daemon=True).start()
         self.root.after(_POLL_MS, self._poll)
+
+    def _end_batch(self) -> None:
+        """Undo what _begin_batch did to the library logger.  Safe to call twice."""
+        lib_log = logging.getLogger("tvshow_noisemaker")
+        if self._handler is not None:
+            lib_log.removeHandler(self._handler)
+            self._handler = None
+        if self._prev_level is not None:
+            lib_log.setLevel(self._prev_level)
+            self._prev_level = None
 
     def _cancel(self) -> None:
         if self.cancelling:
             return
         self.cancelling = True
-        self.cancel.set()
+        self.batch.cancel.set()
+        self.batch.jobs.put(_STOP)  # wake the encode worker if it is waiting for approvals
+        # A fresh batch id: whatever the dying workers still post is ignored from here on,
+        # so the Tk thread ends the run rather than waiting on the last worker to exit.
+        self.batch = _Batch(id=self.batch.id + 1)
         terminate_all()
         self.player.stop()
         self._clear_review()
-        self.encode_jobs.put(_FLUSH)  # wake the encode worker if it is waiting for approvals
-        self.status.configure(text="Cancelling…")
-        self.eta.configure(text="")
+        self._on_idle()
 
-    # -- Workers (no Tk access: they only put tuples on self.q) -------------
+    # -- Workers ----------------------------------------------------------
+    # Static on purpose: a worker sees only its own _Batch, never App state that
+    # the Tk thread may have rebound under it.
 
-    def _detect_worker(self, folders: List[str]) -> None:
+    @staticmethod
+    def _detect_worker(b: _Batch, folders: list[str]) -> None:
         for folder in folders:
-            if self.cancel.is_set():
+            if b.cancel.is_set():
                 break
             try:
-                plan = detect(folder, self._cfg(), progress=self._progress_for(folder), cancel=self.cancel)
+                plan = detect(folder, b.cfg(), progress=b.progress_for(folder), cancel=b.cancel)
             except Exception as exc:  # pylint: disable=broad-except
-                self.q.put(("detect_failed", folder, str(exc)))
+                b.post("detect_failed", folder, str(exc))
                 continue
-            if self.cancel.is_set():
+            if b.cancel.is_set():
                 break
-            self.q.put(("plan", folder, plan))
-        self._detect_done = True
-        # The sentinel goes through the Tk queue, not straight onto encode_jobs: the last
-        # ("plan", …) may still be unhandled, and the encode worker would see an empty queue
-        # with no review rows and call the batch finished before those jobs were ever queued.
-        self.q.put(("detect_done",))
+            b.post("plan", folder, plan)
+        b.detect_done.set()
+        # Through the Tk queue, not straight onto b.jobs: the last ("plan", …) may still be
+        # unhandled, and only the Tk thread knows whether more jobs are still coming.
+        b.post("detect_done")
 
-    def _encode_worker(self) -> None:
-        flushed = False
+    @staticmethod
+    def _encode_worker(b: _Batch) -> None:
+        cpu = os.cpu_count() or 2
         while True:
-            job = self.encode_jobs.get()
-            if self.cancel.is_set():
+            job = b.jobs.get()
+            if job is _STOP or b.cancel.is_set():
                 break
-            if job is _FLUSH:
-                flushed = True
-            else:
-                folder, plan, out_dir = job
-                try:
-                    summary = encode(
-                        plan, self._encode_cfg(), out_dir,
-                        progress=self._progress_for(folder), cancel=self.cancel,
-                    )
-                except Exception as exc:  # pylint: disable=broad-except
-                    summary = Summary(failed=[(Path(folder).name, str(exc))])
-                self.q.put(("encoded", folder, summary))
-            # ponytail: review_rows is read across threads without a lock — list length under
-            # the GIL is enough here; the worker only ever waits longer than needed, never less.
-            if flushed and not self.review_rows and self.encode_jobs.empty():
-                break
-        self.q.put(("idle",))
+            folder, plan, out_dir = job
+            # Leave cores for detection while it is still running; take them all afterwards.
+            workers = None if b.detect_done.is_set() else max(1, cpu - cpu // 2)
+            try:
+                summary = encode(
+                    plan, b.cfg(workers), out_dir,
+                    progress=b.progress_for(folder), cancel=b.cancel,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                summary = Summary(failed=[(Path(folder).name, str(exc))])
+            b.post("encoded", folder, summary)
+        b.post("idle")
 
     # -- Tk-thread message pump --------------------------------------------
 
     def _poll(self) -> None:
         try:
             while True:
-                self._handle(self.q.get_nowait())
+                item = self.batch.q.get_nowait()
+                if isinstance(item[0], int):  # (batch id, message) from a worker
+                    if item[0] == self.batch.id:
+                        self._handle(item[1])
+                else:  # ("log", line), straight from QueueHandler
+                    self._handle(item)
         except queue.Empty:
             pass
         if self.running:
@@ -553,7 +599,10 @@ class App:
         kind = msg[0]
         if kind == "log":
             self._log_append(msg[1])
-        elif kind == "progress":
+            return
+        if not self.running:
+            return  # the batch this belongs to has already finished or been cancelled
+        if kind == "progress":
             self._on_progress(*msg[1:])
         elif kind == "plan":
             self._on_plan(msg[1], msg[2])
@@ -562,12 +611,17 @@ class App:
             self._activity_append(f"✗ {Path(folder).name}: detection failed – {reason}")
         elif kind == "encoded":
             folder, summary = msg[1], msg[2]
+            self._jobs_in_flight -= 1
             if summary.failed:
+                reasons = "; ".join(f"{name}: {why}" for name, why in summary.failed)
                 self._activity_append(
-                    f"{Path(folder).name}: {len(summary.converted)} converted, {len(summary.failed)} failed"
+                    f"{Path(folder).name}: {len(summary.converted)} converted, "
+                    f"{len(summary.failed)} failed – {reasons}"
                 )
+            self._maybe_finish()
         elif kind == "detect_done":
-            self.encode_jobs.put(_FLUSH)
+            self._detect_done = True
+            self._maybe_finish()
         elif kind == "idle":
             self._on_idle()
 
@@ -604,15 +658,11 @@ class App:
             self._add_review_row(folder, ep)
         if now:
             self._enc_total += len(now)
-            self.encode_jobs.put((
-                folder, Plan(input_dir=folder, episodes=now), output_subdir_for(folder, self._dst),
-            ))
+            self._enqueue(folder, Plan(input_dir=folder, episodes=now))
 
     def _on_idle(self) -> None:
         self.running = False
-        if self._handler is not None:
-            logging.getLogger("tvshow_noisemaker").removeHandler(self._handler)
-            self._handler = None
+        self._end_batch()
         self.status.configure(
             text="Cancelled." if self.cancelling else f"Done — {self._total_folders} folder(s) processed."
         )
@@ -652,6 +702,7 @@ class App:
     def _on_close(self) -> None:
         if self.running:
             self._cancel()
+        self._end_batch()
         self.player.stop()
         self.root.destroy()
 
