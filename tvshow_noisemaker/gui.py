@@ -511,7 +511,7 @@ class App:
         if start_threads:
             threading.Thread(target=self._detect_worker, args=(batch, folders), daemon=True).start()
             threading.Thread(target=self._encode_worker, args=(batch,), daemon=True).start()
-        self.root.after(_POLL_MS, self._poll)
+        self.root.after(_POLL_MS, self._poll, batch.id)
 
     def _end_batch(self) -> None:
         """Undo what _begin_batch did to the library logger.  Safe to call twice."""
@@ -581,19 +581,21 @@ class App:
 
     # -- Tk-thread message pump --------------------------------------------
 
-    def _poll(self) -> None:
+    def _poll(self, batch_id: int | None = None) -> None:
+        if batch_id is not None and batch_id != self.batch.id:
+            return  # a duplicate poll loop left running by a cancel→restart; the new one owns it
         try:
             while True:
                 item = self.batch.q.get_nowait()
-                if isinstance(item[0], int):  # (batch id, message) from a worker
+                if item[0] == "log":  # ("log", line), straight from QueueHandler
+                    self._handle(item)
+                else:  # (batch id, message) from a worker
                     if item[0] == self.batch.id:
                         self._handle(item[1])
-                else:  # ("log", line), straight from QueueHandler
-                    self._handle(item)
         except queue.Empty:
             pass
         if self.running:
-            self.root.after(_POLL_MS, self._poll)
+            self.root.after(_POLL_MS, self._poll, self.batch.id)
 
     def _handle(self, msg: tuple) -> None:
         kind = msg[0]
@@ -639,7 +641,8 @@ class App:
             self._enc_t0 = time.monotonic()
         if text.startswith(("✓", "✗", "Cancelled")):
             self._activity_append(text)
-            self._enc_done += 1
+            if not text.startswith("✗ Skipped"):
+                self._enc_done += 1
             self._update_eta()
 
     def _update_eta(self) -> None:
@@ -657,7 +660,7 @@ class App:
         for ep in review:
             self._add_review_row(folder, ep)
         if now:
-            self._enc_total += len(now)
+            self._enc_total += sum(1 for ep in now if ep.encodable)
             self._enqueue(folder, Plan(input_dir=folder, episodes=now))
 
     def _on_idle(self) -> None:

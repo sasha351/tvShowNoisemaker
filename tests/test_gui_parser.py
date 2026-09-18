@@ -193,6 +193,64 @@ def test_messages_arriving_after_cancel_are_ignored(tmp_path):
         root.destroy()
 
 
+def test_skip_confidence_episodes_are_not_counted_in_the_eta_total(tmp_path):
+    """C1: an episode only counts toward the ETA if it actually runs ffmpeg."""
+    root, app = _started(tmp_path)
+    try:
+        plan = Plan(input_dir=str(tmp_path), episodes=[
+            EpisodePlan(path=str(tmp_path / "a.mp4"), duration=1300.0,
+                        intro_start=0.0, intro_end=30.0, outro_start=1260.0),
+            EpisodePlan(path=str(tmp_path / "b.mp4"), duration=1300.0,
+                        intro_start=0.0, intro_end=30.0, outro_start=1260.0),
+            EpisodePlan(path=str(tmp_path / "c.mp4"), duration=1300.0,
+                        intro_start=None, intro_end=None, outro_start=None,
+                        confidence="skip", flags=["not encodable"]),
+        ])
+        app._handle(("plan", str(tmp_path), plan))
+        assert app._enc_total == 2  # the skip-confidence episode never reaches ffmpeg
+        app._handle(("progress", str(tmp_path), "encode", 0, 3, "✗ Skipped – c.mp4: not encodable"))
+        assert app._enc_done == 0
+        app._handle(("progress", str(tmp_path), "encode", 1, 3, "✓ a.mp4"))
+        assert app._enc_done == 1
+    finally:
+        app._end_batch()
+        root.destroy()
+
+
+def test_cancel_clears_the_review_panel_and_hides_the_frame(tmp_path):
+    root, app = _started(tmp_path)
+    try:
+        app._handle(("plan", str(tmp_path), _plan(tmp_path, review=1)))
+        assert app._review_shown is True
+        app._cancel()
+        assert app.review_rows == []
+        assert app._review_shown is False
+        assert app.review_frame.winfo_manager() == ""
+    finally:
+        app._end_batch()
+        root.destroy()
+
+
+def test_approve_all_enqueues_valid_rows_and_stops_at_an_incomplete_one(tmp_path, monkeypatch):
+    monkeypatch.setattr("tvshow_noisemaker.gui.messagebox.showwarning", lambda *a, **k: None)
+    root, app = _started(tmp_path)
+    try:
+        app._handle(("plan", str(tmp_path), _plan(tmp_path, review=3)))
+        for row in app.review_rows[:2]:
+            row.entries["intro_end"].delete(0, "end")
+            row.entries["intro_end"].insert(0, "0:31.0")
+        # third row is left blank (no Skip tick either) — incomplete
+        app._approve_all()
+        names = {app.encode_jobs.get_nowait()[1].episodes[0].basename for _ in range(2)}
+        assert names == {"r0.mp4", "r1.mp4"}
+        assert app.encode_jobs.empty()
+        assert len(app.review_rows) == 1
+        assert app.review_rows[0].episode.basename == "r2.mp4"
+    finally:
+        app._end_batch()
+        root.destroy()
+
+
 def test_closing_removes_the_log_handler_and_restores_the_level(tmp_path):
     import logging
     from tvshow_noisemaker.review import QueueHandler
