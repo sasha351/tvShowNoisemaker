@@ -169,9 +169,9 @@ def _consensus_segments(
     are grouped into runs by single-linkage: consecutive lengths (sorted)
     join the same run while the gap between them is within *tolerance*, so a
     run can span more than *tolerance* end-to-end when chained through an
-    intermediate vote, but never more than ``2 * tolerance``.  The winning run covers the most episodes (ties →
-    longer) and must cover ``max(2, ceil(n_episodes / 3))`` of them, otherwise
-    the season has no consensus.  An episode's segment is the median of its
+    intermediate vote.  The winning run has the most pair-match votes (ties →
+    longer) among runs covering at least ``max(2, ceil(n_episodes / 3))``
+    episodes; with no such run the season has no consensus.  An episode's segment is the median of its
     run votes; votes outside the run (recaps, two-parters, shared cues) are
     returned as outlier lengths so callers can flag them.
     """
@@ -191,19 +191,26 @@ def _consensus_segments(
     # ponytail: O(n log n) sort + linear scan, fine at season-sized vote counts.
     runs: List[List[float]] = []
     for length in sorted({v[0] for v in votes}):
-        if runs and length - runs[-1][-1] <= tolerance and length - runs[-1][0] <= 2 * tolerance:
-            runs[-1].append(length)  # span capped at 2*tolerance so a chain can't drift
+        # ponytail: no cap on a run's total span — real credits votes spread 31–40 s
+        # (variable tail matches) and capping split that cluster so a 20 s tail won.
+        if runs and length - runs[-1][-1] <= tolerance:
+            runs[-1].append(length)
         else:
             runs.append([length])
 
+    # The winner is the run with the most pair-match votes (ties → longer), among
+    # runs covering enough episodes.  Cover alone is wrong: a 20 s closing logo
+    # shared by every episode beat 36 s credits that one episode lacked.
+    min_cover = max(2, math.ceil(n_episodes / 3))
     best_run: List[float] = []
-    best_cover = 0
+    best_votes = 0
     for run in sorted(runs, key=lambda r: r[-1], reverse=True):  # longer first so ties keep the longer
         run_set = set(run)
         cover = len({ep for length, ep, _ in votes if length in run_set})
-        if cover > best_cover:
-            best_run, best_cover = run, cover
-    if best_cover < max(2, math.ceil(n_episodes / 3)):
+        n_votes = sum(1 for length, _, _ in votes if length in run_set)
+        if cover >= min_cover and n_votes > best_votes:
+            best_run, best_votes = run, n_votes
+    if not best_run:
         for length, ep, _ in votes:
             out.outliers.setdefault(ep, []).append(round(length, 1))
         return out

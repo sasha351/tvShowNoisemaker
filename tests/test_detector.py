@@ -744,14 +744,14 @@ def test_consensus_tolerance_groups_lengths_within_three_seconds():
     assert c.outliers == {}
 
 
-def test_consensus_run_span_is_capped_at_twice_the_tolerance():
-    # 20..32 chained by 3 s steps would single-link into one 12 s run; cap splits it.
-    matches = [_theme("a", "b", length=20.0), _theme("c", "d", length=23.0),
-               _theme("e", "f", length=26.0), _theme("g", "h", length=29.0),
-               _theme("i", "j", length=32.0)]
+def test_consensus_chains_a_wide_spread_into_one_cluster():
+    # Real credits votes spread 31–40 s in 1 s steps; they must beat a tight 20 s tail cluster.
+    eps = [f"e{i}" for i in range(10)]
+    matches = [_theme(eps[i], eps[(i + 1) % 10], length=31.0 + i) for i in range(10)]
+    matches += [_theme(eps[i], eps[(i + 5) % 10], length=20.0) for i in range(5)]
     c = _consensus_segments(matches, n_episodes=10)
-    assert max(c.support.values()) == 1
-    assert len(c.segments) <= 6  # a run covers at most 3 lengths (span 6 s)
+    assert 31.0 <= c.median_len <= 40.0
+    assert set(c.segments) == set(eps)
 
 
 def test_consensus_tie_goes_to_the_longer_cluster():
