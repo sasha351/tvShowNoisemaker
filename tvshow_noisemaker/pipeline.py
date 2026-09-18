@@ -322,9 +322,10 @@ def _log_episode(
             fp_ie if fp_ie is not None else 0.0,
             f"{fp_os:.1f}s" if fp_os is not None else "N/A",
         )
-    for flag in ep.flags:
+    flags = ep.flags[1:] if not ep.encodable and ep.flags else ep.flags
+    for flag in flags:
         logger.info("  %s %s", "⚠" if ep.confidence != "high" else "·", flag)
-    if ep.confidence == "skip":
+    if not ep.encodable:
         logger.warning("  ✗ Skipped – %s", ep.flags[0] if ep.flags else "not encodable")
         return
     intro_start = ep.intro_start or 0.0

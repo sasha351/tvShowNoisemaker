@@ -1,6 +1,7 @@
 """Tests for tvshow_noisemaker.pipeline (all subprocess I/O mocked)."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,9 @@ from tvshow_noisemaker.pipeline import (
     EpisodePlan,
     Plan,
     Summary,
+    _log_episode,
     _resolve_episode,
+    _resolve_from_consensus,
     default_encode_workers,
     detect,
     encode,
@@ -207,6 +210,18 @@ def test_resolve_episode_inverted_boundaries_are_skipped():
     fp = "/v/ep01.mkv"
     ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 20.0)}, Config(), _consensus(fp))
     assert ep.confidence == "skip" and ep.flags[0].startswith("Invalid boundaries")
+
+
+def test_log_episode_review_with_none_boundary_has_no_trim_line_and_no_duplicate_reason(caplog):
+    ep = EpisodePlan(
+        path="/v/ep05.mkv", confidence="review", intro_end=30.0, outro_start=None,
+        flags=["no credits match (season credits 36 s)"],
+    )
+    with caplog.at_level(logging.INFO, logger="tvshow_noisemaker.pipeline"):
+        _log_episode(ep, {})
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("Trim:" in m for m in messages)
+    assert sum("no credits match" in m for m in messages) == 1
 
 
 def _touch(tmp_path, *names):
