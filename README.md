@@ -53,7 +53,7 @@ If conda is installed, the pip-generated entry point (`.venv/bin/tvshow-noisemak
 - Encodes to MP3 with metadata (artist/album/title/track/genre).
 - Writes a per-run log file with summary and stage timings.
 
-Detection is decided by the season, not by single pairs: the theme is the shared segment most episodes agree on, so a "previously on" recap or a two-parter cannot masquerade as the intro. Episodes that do not share it (a special without the theme, different credits) are flagged for review instead of being cut by guesswork; the CLI skips those with incomplete boundaries and says why, the plan JSON (`--detect-only`) carries the flags. Every cut gives back `--cut-margin` seconds (default 0.5) so a boundary that is slightly off keeps a little theme rather than losing dialogue.
+Detection is decided by the season, not by single pairs: the theme is the shared segment most episodes agree on, so a "previously on" recap or a two-parter cannot masquerade as the intro. Episodes that do not share it (a special without the theme, different credits) are flagged for review instead of being cut by guesswork; the CLI skips those with incomplete boundaries and says why, the plan JSON (`--detect-only`) carries the flags. Boundaries are then refined by cross-correlating each episode's audio against a reference episode, so cuts land within about a second. Every cut gives back `--cut-margin` seconds (default 0.5) so a boundary that is slightly off keeps a little theme rather than losing dialogue.
 
 ## Usage
 

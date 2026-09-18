@@ -47,8 +47,10 @@ Bootstrap new truth entries with
 `tvshow-noisemaker -i <season> -o /tmp/x --detect-only plan.json`, then
 verify each cut by ear and copy the corrected numbers in.
 
-Expected per show (bootstrapped truth, 2026-09-17): FamilyGuy02 — E13 review
-("no intro match"), E05/E20 review ("no credits match"), everything else high;
-Friends03 — all high, flag "no shared credits found in this season" (credits are
-6–12 s, below the 15 s match floor); TopGear05 — no intro in the season
-(intro_end 0.0), 3 episodes with credits high, 4 review ("no credits match").
+Expected per show (bootstrapped truth, cross-correlation refinement, 2026-09-17):
+FamilyGuy02 — E13 review ("no intro match"), E05/E20 review ("no credits match"),
+E10 review ("no credits match", credits `outro_start` undetected), E11 review
+("credits length mismatch"), everything else (16 episodes) high; Friends03 — all
+25 high, flag "no shared credits found in this season" (credits are 6–12 s, below
+the 15 s match floor); TopGear05 — no intro in the season (intro_end 0.0),
+3 episodes with credits high, 4 review ("no credits match").
