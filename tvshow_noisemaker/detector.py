@@ -1442,7 +1442,7 @@ def detect_by_fingerprinting(
     stats.candidate_files = len(filepaths)
     stats.elapsed_sec = time.monotonic() - start_time
     _set_last_fingerprint_stats(stats)
-    return _refine_results_with_silence(results, durations)
+    return _refine_results_with_silence(results, durations, cut_margin=cut_margin)
 
 
 def _silence_cache_path(

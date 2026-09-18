@@ -28,6 +28,7 @@ from tvshow_noisemaker.detector import (
     _refine_results_with_silence,
     _smooth,
     _snap_to_silence,
+    detect_by_fingerprinting,
     detect_by_silence,
     get_duration,
     get_last_consensus,
@@ -1002,3 +1003,12 @@ def test_refine_keeps_original_when_margin_breaks_ordering():
     with patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda _f, t, _d, safe="before": t):
         refined = _refine_results_with_silence(results, durations, cut_margin=0.5)
     assert refined["/show/ep01.mp4"] == (29.8, 30.0, 2550.0)
+
+
+def test_detect_by_fingerprinting_forwards_cut_margin_on_stft_fallback():
+    with patch("tvshow_noisemaker.detector._check_fpcalc", return_value=False), \
+         patch("tvshow_noisemaker.detector._extract_audio_pcm", return_value=None), \
+         patch("tvshow_noisemaker.detector._refine_results_with_silence", return_value={}) as refine:
+        detect_by_fingerprinting(["/v/a.mkv", "/v/b.mkv"], durations={"/v/a.mkv": 1300.0, "/v/b.mkv": 1300.0},
+                                 cut_margin=0.25)
+    assert refine.call_args.kwargs["cut_margin"] == 0.25
