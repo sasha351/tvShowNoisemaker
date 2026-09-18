@@ -276,11 +276,6 @@ def _resolve_from_consensus(
         ):
             ep.confidence = "review"
             ep.flags.append(f"intro length {info.intro_len:.0f} s vs season {consensus.intro_len:.0f} s")
-    if info.intro_outliers:
-        ep.flags.append(
-            f"ignored {len(info.intro_outliers)} other shared segment(s) near the start "
-            f"({', '.join(f'{x:.0f} s' for x in info.intro_outliers)})"
-        )
 
     if outro_start is None and consensus.outro_len is None:
         ep.outro_start = ep.duration
@@ -300,6 +295,12 @@ def _resolve_from_consensus(
         ):
             ep.confidence = "review"
             ep.flags.append(f"credits length {info.outro_len:.0f} s vs season {consensus.outro_len:.0f} s")
+
+    if info.intro_outliers:
+        ep.flags.append(
+            f"ignored {len(info.intro_outliers)} other shared segment(s) near the start "
+            f"({', '.join(f'{x:.0f} s' for x in info.intro_outliers)})"
+        )
     if info.outro_outliers:
         ep.flags.append(
             f"ignored {len(info.outro_outliers)} other shared segment(s) near the end "

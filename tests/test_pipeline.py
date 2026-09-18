@@ -164,6 +164,18 @@ def test_resolve_episode_outliers_are_informational():
     ]
 
 
+def test_resolve_from_consensus_outlier_flags_come_after_both_verdicts():
+    ep = EpisodePlan(path="/v/ep01.mkv", duration=2700.0)
+    info = MatchInfo(intro_support=3, outro_support=0, intro_len=30.0, outro_len=None,
+                     intro_outliers=[45.0], outro_outliers=[])
+    consensus = SeasonConsensus(intro_len=30.0, outro_len=36.0)
+    _resolve_from_consensus(ep, (0.0, 30.0, None), info, consensus)
+    assert ep.flags == [
+        "no credits match (season credits 36 s)",
+        "ignored 1 other shared segment(s) near the start (45 s)",
+    ]
+
+
 def test_resolve_episode_config_timestamps_win_over_fingerprint():
     fp = "/v/ep01.mkv"
     cfg = Config(timestamps={"ep01.mkv": {"intro_end": 40.0, "outro_start": 2600.0}})
