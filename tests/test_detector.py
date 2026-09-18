@@ -871,6 +871,24 @@ def test_snap_to_silence_snaps_to_nearest_start():
         assert _snap_to_silence("f.mkv", 100.0, 1200.0) == 99.8
 
 
+def test_snap_prefers_safe_side_before_for_intro_end():
+    # A silence 0.3 s after t (first silence after the boundary) loses to one 1.5 s before it.
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([98.5, 100.3], [99.0, 100.8])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before") == 98.5
+
+
+def test_snap_prefers_safe_side_after_for_starts():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([98.5, 100.3], [99.0, 100.8])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 100.3
+
+
+def test_snap_falls_back_to_nearest_on_unsafe_side():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([100.3, 101.5], [100.8, 102.0])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before") == 100.3   # first after t, not 101.5
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([96.0, 99.0], [96.5, 99.4])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 99.0
+
+
 def test_snap_to_silence_returns_t_when_silencedetect_fails():
     with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=None):
         assert _snap_to_silence("f.mkv", 100.0, 1200.0) == 100.0
@@ -898,7 +916,7 @@ def test_refine_results_with_silence_keeps_original_on_bad_ordering():
     results = {"/show/ep01.mp4": (10.0, 30.0, 2550.0)}
     durations = {"/show/ep01.mp4": 2700.0}
 
-    def _fake_snap(_fp, t, _duration):
+    def _fake_snap(_fp, t, _duration, safe="before"):
         if t == 10.0:
             return 35.0  # now >= intro_end, breaks ordering
         return t
@@ -924,7 +942,7 @@ def test_refine_results_with_silence_refines_normal_tuple():
 
     shifts = {10.0: 9.5, 30.0: 29.8, 2550.0: 2549.0, 12.0: 11.5, 32.0: 31.8, 2560.0: 2559.0}
 
-    def _fake_snap(_fp, t, _duration):
+    def _fake_snap(_fp, t, _duration, safe="before"):
         return shifts.get(t, t)
 
     with patch(
@@ -932,8 +950,8 @@ def test_refine_results_with_silence_refines_normal_tuple():
     ):
         refined = _refine_results_with_silence(results, durations)
 
-    assert refined["/show/ep01.mp4"] == (9.5, 29.8, 2549.0)
-    assert refined["/show/ep02.mp4"] == (11.5, 31.8, 2559.0)
+    assert refined["/show/ep01.mp4"] == (10.0, 29.3, 2549.5)
+    assert refined["/show/ep02.mp4"] == (12.0, 31.3, 2559.5)
 
 
 def test_refine_results_with_silence_passes_through_missing_duration():
@@ -945,9 +963,42 @@ def test_refine_results_with_silence_passes_through_missing_duration():
 
     with patch(
         "tvshow_noisemaker.detector._snap_to_silence",
-        side_effect=lambda _fp, t, _duration: t + 0.1,
+        side_effect=lambda _fp, t, _duration, safe="before": t + 0.1,
     ):
         refined = _refine_results_with_silence(results, durations)
 
-    assert refined["/show/ep01.mp4"] == (10.1, 30.1, 2550.1)
+    assert refined["/show/ep01.mp4"] == (10.6, 29.6, 2550.6)
     assert refined["/show/ep02.mp4"] == (12.0, 32.0, 2560.0)
+
+
+def test_refine_snaps_each_boundary_toward_its_safe_side_then_applies_margin():
+    results = {"/show/ep01.mp4": (40.0, 70.0, 2550.0)}
+    durations = {"/show/ep01.mp4": 2600.0}
+    seen = []
+
+    def _fake_snap(_fp, t, _dur, safe="before"):
+        seen.append((t, safe))
+        return t
+
+    with patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=_fake_snap):
+        refined = _refine_results_with_silence(results, durations, cut_margin=0.5)
+
+    assert seen == [(40.0, "after"), (70.0, "before"), (2550.0, "after")]
+    assert refined["/show/ep01.mp4"] == (40.5, 69.5, 2550.5)
+
+
+def test_refine_margin_skips_none_and_zero_intro_start():
+    results = {"/show/ep01.mp4": (0.0, 30.0, None), "/show/ep02.mp4": (None, None, 2550.0)}
+    durations = {"/show/ep01.mp4": 2600.0, "/show/ep02.mp4": 2600.0}
+    with patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda _f, t, _d, safe="before": t):
+        refined = _refine_results_with_silence(results, durations, cut_margin=0.5)
+    assert refined["/show/ep01.mp4"] == (0.0, 29.5, None)      # intro_start 0 is not a cut, never moved
+    assert refined["/show/ep02.mp4"] == (None, None, 2550.5)
+
+
+def test_refine_keeps_original_when_margin_breaks_ordering():
+    results = {"/show/ep01.mp4": (29.8, 30.0, 2550.0)}
+    durations = {"/show/ep01.mp4": 2600.0}
+    with patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda _f, t, _d, safe="before": t):
+        refined = _refine_results_with_silence(results, durations, cut_margin=0.5)
+    assert refined["/show/ep01.mp4"] == (29.8, 30.0, 2550.0)

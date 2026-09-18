@@ -28,6 +28,7 @@ def test_load_config_valid_file(tmp_path):
         "silence_db": -45.0,
         "min_silence_len": 1.0,
         "fingerprint_search_window": 180.0,
+        "cut_margin": 0.8,
     }
     cfg_file.write_text(json.dumps(data), encoding="utf-8")
     result = load_config(str(cfg_file))
@@ -37,6 +38,7 @@ def test_load_config_valid_file(tmp_path):
     assert result["timestamps"]["ep01.mp4"]["intro_end"] == 32.0
     assert result["silence_db"] == -45.0
     assert result["fingerprint_search_window"] == 180.0
+    assert result["cut_margin"] == 0.8
 
 
 def test_load_config_missing_file():
@@ -129,6 +131,7 @@ def test_build_config_defaults():
     assert cfg.silence_db == -40.0
     assert cfg.min_silence_len == 0.5
     assert cfg.fingerprint_search_window == 300.0
+    assert cfg.cut_margin == 0.5
     assert cfg.use_fingerprinting is True
     assert cfg.intro_duration is None
     assert cfg.outro_duration is None
@@ -142,14 +145,16 @@ def test_build_config_cli_overrides_file():
         silence_db=None,
         min_silence_len=None,
         fingerprint_search_window=None,
+        cut_margin=0.2,
         fingerprint=False,
         log_file="out.log",
     )
-    file_data = {"intro_duration": 99.0, "mp3_bitrate": 64}
+    file_data = {"intro_duration": 99.0, "mp3_bitrate": 64, "cut_margin": 0.9}
     cfg = build_config(args, file_data)
     assert cfg.intro_duration == 10.0      # CLI wins
     assert cfg.outro_duration == 20.0
     assert cfg.mp3_bitrate == 320          # CLI wins
+    assert cfg.cut_margin == 0.2           # CLI wins
     assert cfg.use_fingerprinting is False
     assert cfg.log_file == "out.log"
 

@@ -361,6 +361,7 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
         try:
             fingerprint_results = detect_by_fingerprinting(
                 files, durations=durations, search_window=cfg.fingerprint_search_window,
+                cut_margin=cfg.cut_margin,
             )
             plan.fingerprint_stats = get_last_fingerprint_stats()
             consensus = get_last_consensus()

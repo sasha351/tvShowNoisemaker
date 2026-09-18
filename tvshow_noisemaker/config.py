@@ -38,6 +38,7 @@ _VALID_KEYS = {
     "silence_db",
     "min_silence_len",
     "fingerprint_search_window",
+    "cut_margin",
 }
 
 VALID_OUTPUT_FORMATS = {"mp3", "m4a", "flac", "wav"}
@@ -56,6 +57,7 @@ class Config:
     silence_db: float = -40.0
     min_silence_len: float = 0.5
     fingerprint_search_window: float = 300.0
+    cut_margin: float = 0.5
     use_fingerprinting: bool = True
     log_file: Optional[str] = None
     workers: Optional[int] = None
@@ -92,7 +94,7 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
     validated: Dict[str, Any] = {}
 
     for float_key in ("intro_duration", "outro_duration", "silence_db",
-                      "min_silence_len", "fingerprint_search_window"):
+                      "min_silence_len", "fingerprint_search_window", "cut_margin"):
         if float_key in raw:
             val = raw[float_key]
             if not isinstance(val, (int, float)):
@@ -166,6 +168,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         "fingerprint_search_window",
         300.0,
     )
+    cut_margin = _pick(getattr(args, "cut_margin", None), "cut_margin", 0.5)
     timestamps = config_file_data.get("timestamps", {})
 
     workers_raw = getattr(args, "workers", None)
@@ -180,6 +183,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         silence_db=float(silence_db),
         min_silence_len=float(min_silence_len),
         fingerprint_search_window=float(fingerprint_search_window),
+        cut_margin=float(cut_margin),
         use_fingerprinting=getattr(args, "fingerprint", True),
         log_file=getattr(args, "log_file", None),
         workers=workers,

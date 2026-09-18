@@ -1099,12 +1099,17 @@ def _detect_by_chromaprint(
 # ---------------------------------------------------------------------------
 
 
-def _snap_to_silence(filepath: str, t: float, duration: float) -> float:
-    """Snap boundary *t* to the start of the nearest silence within
-    [t - _REFINE_WINDOW_BEFORE, t + _REFINE_WINDOW_AFTER].
+def _snap_to_silence(filepath: str, t: float, duration: float, safe: str = "before") -> float:
+    """Snap boundary *t* to the start of a nearby silence, preferring the safe side.
 
-    Mirrors intro-skipper's silence-based intro-end adjustment.  Returns
-    *t* unchanged when no silence is found or *t* is at the file edges.
+    Searches [t − _REFINE_WINDOW_BEFORE, t + _REFINE_WINDOW_AFTER] like
+    intro-skipper.  *safe* names the side where moving the cut can only keep
+    more content: ``"before"`` for intro_end (earlier keeps a little theme),
+    ``"after"`` for intro_start and outro_start (later keeps a little cold open
+    or episode).  Silences on the safe side win, closest first; the unsafe side
+    is used only when the safe side has none, and then only the silence nearest
+    *t* — never one past spoken words.  Returns *t* unchanged when no silence is
+    found or *t* is at the file edges.
     """
     if t <= _REFINE_WINDOW_BEFORE or t >= duration - _REFINE_WINDOW_AFTER:
         return t
@@ -1119,24 +1124,28 @@ def _snap_to_silence(filepath: str, t: float, duration: float) -> float:
     if result is None:
         return t
     starts, _ends = result
-    if not starts:
-        return t
-
-    closest = min(starts, key=lambda start: abs(start - t))
-    if abs(closest - t) > _REFINE_WINDOW_BEFORE:
-        return t
-    return closest
+    before = [s for s in starts if s <= t]
+    after = [s for s in starts if s > t]
+    preferred, fallback = (before, after) if safe == "before" else (after, before)
+    for candidates in (preferred, fallback):
+        if candidates:
+            return min(candidates, key=lambda start: abs(start - t))
+    return t
 
 
 def _refine_results_with_silence(
     results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]],
     durations: Dict[str, float],
+    cut_margin: float = 0.5,
 ) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
     """Snap each result's boundaries to nearby silence via :func:`_snap_to_silence`.
 
     Runs one file per thread since each ffmpeg call only scans a 7-second
     window.  Falls back to the original (unrefined) tuple for a file when
     snapping would break intro_start < intro_end < outro_start ordering.
+    Then *cut_margin* seconds are given back on every cut (intro_start later,
+    intro_end earlier, outro_start later) so an off-by-a-little boundary keeps
+    a little theme rather than losing dialogue.
     """
     refinable = [fp for fp in results if durations.get(fp) is not None]
     if not refinable:
@@ -1151,15 +1160,15 @@ def _refine_results_with_silence(
 
         new_intro_start = intro_start
         if intro_start is not None and intro_start > 0.0:
-            new_intro_start = _snap_to_silence(fp, intro_start, duration)
+            new_intro_start = _snap_to_silence(fp, intro_start, duration, safe="after") + cut_margin
 
         new_intro_end = intro_end
         if intro_end is not None:
-            new_intro_end = _snap_to_silence(fp, intro_end, duration)
+            new_intro_end = _snap_to_silence(fp, intro_end, duration, safe="before") - cut_margin
 
         new_outro_start = outro_start
         if outro_start is not None:
-            new_outro_start = _snap_to_silence(fp, outro_start, duration)
+            new_outro_start = min(duration, _snap_to_silence(fp, outro_start, duration, safe="after") + cut_margin)
 
         if (
             new_intro_start is not None
@@ -1192,6 +1201,7 @@ def detect_by_fingerprinting(
     search_window: float = 300.0,
     min_segment: float = 15.0,
     max_segment: float = 120.0,
+    cut_margin: float = 0.5,
 ) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
     """Detect intro/outro boundaries for a batch of episode files.
 
@@ -1208,6 +1218,8 @@ def detect_by_fingerprinting(
         How many seconds from the start/end of each file to examine.
     min_segment / max_segment:
         Clamp on the detected intro/outro duration.
+    cut_margin:
+        Seconds given back on every fingerprint cut after silence snapping.
 
     Returns
     -------
@@ -1223,7 +1235,7 @@ def detect_by_fingerprinting(
                 filepaths, durations, search_window, min_segment, max_segment,
             )
             if result:
-                return _refine_results_with_silence(result, durations)
+                return _refine_results_with_silence(result, durations, cut_margin=cut_margin)
             logger.info(
                 "Chromaprint detection found no boundaries; "
                 "falling back to chroma STFT fingerprinting"

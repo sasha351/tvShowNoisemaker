@@ -164,7 +164,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to a JSON config file.  CLI flags take precedence.  "
             "Supports keys: intro_duration, outro_duration, timestamps, "
             "mp3_bitrate, output_format, silence_db, min_silence_len, "
-            "fingerprint_search_window."
+            "fingerprint_search_window, cut_margin."
         ),
     )
 
@@ -222,6 +222,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "How many seconds from the start/end to examine when fingerprinting "
             "(default: 300)."
         ),
+    )
+    parser.add_argument(
+        "--cut-margin",
+        dest="cut_margin",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Seconds given back on every detected cut so a slightly-off boundary keeps a little "
+             "theme instead of losing dialogue (default: 0.5).",
     )
 
     parser.add_argument(

@@ -278,6 +278,7 @@ def test_detect_probes_fingerprints_and_resolves(tmp_path):
     assert set(plan.stage_timings) == {"probe", "fingerprint", "boundaries"}
     mock_fp.assert_called_once()
     assert mock_fp.call_args.kwargs["search_window"] == 300.0
+    assert mock_fp.call_args.kwargs["cut_margin"] == 0.5
 
 
 def test_detect_skips_fingerprinting_when_disabled_or_single_file(tmp_path):
