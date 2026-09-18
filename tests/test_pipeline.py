@@ -201,13 +201,18 @@ def test_resolve_episode_user_durations_are_config_and_high():
     assert (ep.source, ep.confidence, ep.flags) == ("config", "high", [])
 
 
-def test_resolve_episode_user_durations_win_over_fingerprint_match():
+def test_resolve_episode_fingerprint_match_beats_user_durations():
     fp = "/v/ep01.mkv"
-    with patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2670.0)) as rb:
-        ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 45.0, 2600.0)}, Config(intro_duration=30.0, outro_duration=30.0),
-                              SeasonConsensus(intro_len=45.0, episodes={fp: MatchInfo(intro_support=3)}))
-    rb.assert_called_once()
-    assert (ep.intro_end, ep.source, ep.confidence) == (30.0, "config", "high")
+    with patch("tvshow_noisemaker.pipeline.resolve_boundaries", side_effect=AssertionError("must not be called")):
+        ep = _resolve_episode(
+            fp, 2700.0, {fp: (0.0, 45.0, 2600.0)},
+            Config(intro_duration=30.0, outro_duration=30.0),
+            SeasonConsensus(
+                intro_len=45.0, outro_len=100.0,
+                episodes={fp: MatchInfo(intro_support=3, outro_support=3, intro_len=45.0, outro_len=100.0)},
+            ),
+        )
+    assert (ep.intro_end, ep.source, ep.confidence) == (45.0, "fingerprint", "high")
 
 
 def test_resolve_episode_nothing_shared_in_season_is_skipped():
