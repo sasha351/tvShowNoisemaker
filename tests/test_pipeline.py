@@ -229,6 +229,16 @@ def test_resolve_episode_nothing_shared_in_season_is_skipped():
     assert ep.flags[0] == "No intro/outro boundaries detected (skipped to avoid full-file conversion)"
 
 
+def test_resolve_episode_no_match_honours_user_durations():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(
+        fp, 2700.0, {fp: (None, None, None)},
+        Config(intro_duration=30.0, outro_duration=30.0),
+        SeasonConsensus(episodes={fp: MatchInfo()}),
+    )
+    assert (ep.source, ep.confidence, ep.intro_end, ep.outro_start) == ("config", "high", 30.0, 2670.0)
+
+
 def test_resolve_episode_inverted_boundaries_are_skipped():
     fp = "/v/ep01.mkv"
     ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 20.0)}, Config(), _consensus(fp))
