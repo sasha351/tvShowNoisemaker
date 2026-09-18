@@ -635,3 +635,41 @@ def test_encode_counts_terminated_ffmpeg_as_cancelled_not_failed(tmp_path):
     assert summary.failed == []
     assert summary.cancelled is True
     assert len(summary.skipped) == 3 and all(reason == "Cancelled" for _, reason in summary.skipped)
+
+
+def test_encode_progress_reports_cancelled_message_for_terminated_episode(tmp_path):
+    plan = _plan(tmp_path)
+    cancel = threading.Event()
+    messages: dict[str, list[str]] = {"encode": []}
+
+    def _terminated(**kwargs):
+        cancel.set()  # cancel arrives while this file is encoding; ffmpeg dies with an error
+        raise RuntimeError("ffmpeg failed (exit -15)")
+
+    def _progress(stage, done, total, message):
+        if stage == "encode":
+            messages["encode"].append(message)
+
+    with patch("tvshow_noisemaker.pipeline.process_file", side_effect=_terminated), \
+         patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None):
+        encode(plan, Config(workers=1), str(tmp_path / "out"), progress=_progress, cancel=cancel)
+    assert "Cancelled – ep01.mp4" in messages["encode"]
+
+
+def test_detect_returns_empty_plan_when_cancelled_during_fingerprinting(tmp_path):
+    (tmp_path / "ep01.mp4").touch(); (tmp_path / "ep02.mp4").touch()
+    cancel = threading.Event()
+
+    def _fingerprint(*args, **kwargs):
+        cancel.set()  # cancel arrives mid-fingerprinting
+        return {}
+
+    with patch("tvshow_noisemaker.pipeline.probe_durations", return_value={}), \
+         patch("tvshow_noisemaker.pipeline.detect_by_fingerprinting", side_effect=_fingerprint), \
+         patch("tvshow_noisemaker.pipeline.get_last_fingerprint_stats", return_value={}), \
+         patch("tvshow_noisemaker.pipeline.get_last_consensus", return_value=SeasonConsensus()), \
+         patch("tvshow_noisemaker.pipeline._resolve_episode") as resolve:
+        plan = detect(str(tmp_path), Config(), cancel=cancel)
+    assert plan.episodes == []
+    assert "fingerprint" in plan.stage_timings
+    resolve.assert_not_called()
