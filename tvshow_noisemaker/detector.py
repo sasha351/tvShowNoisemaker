@@ -80,6 +80,17 @@ _REFINE_WINDOW_AFTER = 2.0    # seconds searched after a detected boundary
 _REFINE_NOISE_DB = -50.0
 _REFINE_MIN_SILENCE = 0.33
 
+# Cross-correlation refinement of Chromaprint boundaries against a reference episode.
+_XCORR_SR = 8000
+_XCORR_HOP = 200                 # 25 ms frames
+_XCORR_NFFT = 1024
+_XCORR_WINDOW = 6.0              # seconds on each side of the raw boundary
+_XCORR_MAX_LAG = 2.0             # seconds; raw boundaries of two episodes disagree by less than this
+_XCORR_SIM_THRESHOLD = 0.7       # ponytail: calibration knob — 0.7 errs toward keeping theme (measured on 3 shows)
+_XCORR_SMOOTH = 8                # frames (0.2 s) of similarity smoothing
+_XCORR_PROBE = 2.5               # seconds inside the shared region where similarity must already be high
+_XCORR_SNAP_WINDOW = 1.0         # seconds; refined boundaries only snap to a silence this close, safe side only
+
 
 @dataclass
 class FingerprintStats:
@@ -135,6 +146,8 @@ class SeasonConsensus:
     intro_episodes: int = 0            # episodes covered by the winning cluster
     outro_episodes: int = 0
     episodes: Dict[str, MatchInfo] = field(default_factory=dict)
+    intro_refs: List[str] = field(default_factory=list)  # top-2 episodes by intro support, for xcorr refinement
+    outro_refs: List[str] = field(default_factory=list)
 
 
 # ponytail: same module-level side channel as the fingerprint stats; the
@@ -1052,9 +1065,13 @@ def _detect_by_chromaprint(
         _pairwise_matches(outro_fps, valid_paths, min_segment, max(max_segment, search_window), max_workers),
         len(valid_paths),
     )
+    def _top_refs(support: Dict[str, int]) -> List[str]:
+        return [fp for fp, _ in sorted(support.items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
+
     consensus = SeasonConsensus(
         intro_len=intro.median_len, outro_len=outro.median_len,
         intro_episodes=len(intro.segments), outro_episodes=len(outro.segments),
+        intro_refs=_top_refs(intro.support), outro_refs=_top_refs(outro.support),
     )
 
     # ── Assemble per-episode results: None where this episode did not match ──
@@ -1106,27 +1123,101 @@ def _detect_by_chromaprint(
 # ---------------------------------------------------------------------------
 
 
-def _snap_to_silence(filepath: str, t: float, duration: float, safe: str = "before") -> float:
+def _log_band_spectrogram(pcm: np.ndarray) -> Optional[np.ndarray]:
+    """40 log-spaced bands × 25 ms frames, each frame z-normalised, so a frame-wise dot product is a cosine similarity."""
+    if pcm is None or pcm.size < _XCORR_NFFT:
+        return None
+    frames = np.lib.stride_tricks.sliding_window_view(pcm, _XCORR_NFFT)[::_XCORR_HOP] * np.hanning(_XCORR_NFFT)
+    mag = np.abs(np.fft.rfft(frames, axis=1)).T  # (513, T)
+    # ponytail: 44 (not the "obvious" 41) so int-rounding + dedup near the low
+    # end still leaves exactly 40 unique edges → 40 bands, matching the
+    # documented (40, T) shape.
+    edges = np.unique(np.geomspace(4, 512, 44).astype(int))
+    bands = np.stack([mag[edges[i]:edges[i + 1]].mean(axis=0) for i in range(len(edges) - 1)])
+    spec = np.log1p(bands * 100.0)
+    spec -= spec.mean(axis=0, keepdims=True)
+    spec /= spec.std(axis=0, keepdims=True) + 1e-6
+    return spec
+
+
+def _xcorr_boundary(ep_path: str, t_ep: float, ref_path: str, t_ref: float, shared: str) -> Optional[float]:
+    """Move *t_ep* to where the audio shared with *ref_path* really starts or ends.
+
+    Both files are decoded from ``t - pre`` to ``t + _XCORR_WINDOW`` (same *pre* so the raw
+    boundaries line up), the best lag within ±_XCORR_MAX_LAG aligns them, and the boundary is the
+    edge of the run of frames whose similarity exceeds _XCORR_SIM_THRESHOLD, walked outward from a
+    probe point _XCORR_PROBE s inside the shared side.  *shared* is ``"before"`` when the shared
+    audio ends at the boundary (intro_end) and ``"after"`` when it begins there (intro_start,
+    outro_start).  Returns ``None`` when audio cannot be decoded or the probe point is not similar.
+    """
+    fps = _XCORR_SR / _XCORR_HOP
+    pre = min(_XCORR_WINDOW, t_ep, t_ref)
+    ref_spec = _log_band_spectrogram(_extract_audio_pcm(ref_path, t_ref - pre, pre + _XCORR_WINDOW, sr=_XCORR_SR))
+    ep_spec = _log_band_spectrogram(_extract_audio_pcm(ep_path, t_ep - pre, pre + _XCORR_WINDOW, sr=_XCORR_SR))
+    if ref_spec is None or ep_spec is None:
+        return None
+    n = min(ref_spec.shape[1], ep_spec.shape[1])
+    ref_spec, ep_spec = ref_spec[:, :n], ep_spec[:, :n]
+
+    max_lag = int(_XCORR_MAX_LAG * fps)
+    best_lag, best_score = 0, -np.inf
+    for lag in range(-max_lag, max_lag + 1):  # ep[t] ~ ref[t + lag]
+        a0, b0 = max(0, lag), max(0, -lag)
+        m = n - abs(lag)
+        if m <= 0:
+            continue
+        score = float((ref_spec[:, a0:a0 + m] * ep_spec[:, b0:b0 + m]).mean())
+        if score > best_score:
+            best_lag, best_score = lag, score
+    a0, b0 = max(0, best_lag), max(0, -best_lag)
+    m = n - abs(best_lag)
+    sim = (ref_spec[:, a0:a0 + m] * ep_spec[:, b0:b0 + m]).mean(axis=0)
+    smooth = np.convolve(sim, np.ones(_XCORR_SMOOTH) / _XCORR_SMOOTH, mode="same")
+    good = smooth > _XCORR_SIM_THRESHOLD
+
+    centre = int(round(pre * fps)) - b0  # frame of t_ep in the aligned ep spectrogram
+    probe = int(_XCORR_PROBE * fps)
+    if shared == "before":
+        i = centre - probe
+        if i < 0 or i >= m or not good[i]:
+            return None
+        while i + 1 < m and good[i + 1]:
+            i += 1
+        edge = i + 1
+    else:
+        i = centre + probe
+        if i < 0 or i >= m or not good[i]:
+            return None
+        while i - 1 >= 0 and good[i - 1]:
+            i -= 1
+        edge = i
+    return (t_ep - pre) + (edge + b0) * _XCORR_HOP / _XCORR_SR
+
+
+def _snap_to_silence(
+    filepath: str, t: float, duration: float, safe: str = "before",
+    before: float = _REFINE_WINDOW_BEFORE, after: float = _REFINE_WINDOW_AFTER,
+) -> float:
     """Snap boundary *t* to the start of a nearby silence, preferring the safe side.
 
-    Searches [t − _REFINE_WINDOW_BEFORE, t + _REFINE_WINDOW_AFTER] like
-    intro-skipper.  *safe* names the side where moving the cut can only keep
-    more content: ``"before"`` for intro_end (earlier keeps a little theme),
-    ``"after"`` for intro_start and outro_start (later keeps a little cold open
-    or episode).  Silences on the safe side win, closest first; the unsafe side
-    is used only when the safe side has none, and then only the silence nearest
-    *t* — never one past spoken words.  Returns *t* unchanged when no silence is
-    found or *t* is at the file edges.
+    Searches [t − before, t + after] like intro-skipper.  *safe* names the
+    side where moving the cut can only keep more content: ``"before"`` for
+    intro_end (earlier keeps a little theme), ``"after"`` for intro_start and
+    outro_start (later keeps a little cold open or episode).  Silences on the
+    safe side win, closest first; the unsafe side is used only when the safe
+    side has none, and then only the silence nearest *t* — never one past
+    spoken words.  Returns *t* unchanged when no silence is found or *t* is at
+    the file edges.
     """
-    if t <= _REFINE_WINDOW_BEFORE or t >= duration - _REFINE_WINDOW_AFTER:
+    if t <= before or t >= duration - after:
         return t
 
     result = _run_silencedetect(
         filepath,
         _REFINE_NOISE_DB,
         _REFINE_MIN_SILENCE,
-        seek=t - _REFINE_WINDOW_BEFORE,
-        limit=_REFINE_WINDOW_BEFORE + _REFINE_WINDOW_AFTER,
+        seek=t - before,
+        limit=before + after,
     )
     if result is None:
         return t
@@ -1144,19 +1235,55 @@ def _refine_results_with_silence(
     results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]],
     durations: Dict[str, float],
     cut_margin: float = 0.5,
+    references: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]]:
     """Snap each result's boundaries to nearby silence via :func:`_snap_to_silence`.
 
-    Runs one file per thread since each ffmpeg call only scans a 7-second
-    window.  Falls back to the original (unrefined) tuple for a file when
-    snapping would break intro_start < intro_end < outro_start ordering.
-    Then *cut_margin* seconds are given back on every cut (intro_start later,
-    intro_end earlier, outro_start later) so an off-by-a-little boundary keeps
-    a little theme rather than losing dialogue.
+    When *references* names reference episodes for a side ("intro"/"outro"),
+    each boundary is first cross-correlated against the first usable
+    reference (:func:`_xcorr_boundary`) and, if that succeeds, snapped to
+    silence within a tight 1 s safe-side-only window; otherwise it falls back
+    to the old ±5/2 s snap.  Runs one file per thread since each ffmpeg call
+    only scans a short window.  Falls back to the original (unrefined) tuple
+    for a file when snapping would break intro_start < intro_end < outro_start
+    ordering.  Then *cut_margin* seconds are given back on every cut
+    (intro_start later, intro_end earlier, outro_start later) so an
+    off-by-a-little boundary keeps a little theme rather than losing dialogue.
     """
     refinable = [fp for fp in results if durations.get(fp) is not None]
     if not refinable:
         return results
+
+    references = references or {}
+
+    def _boundary(fp: str, t: Optional[float], idx: int, side: str, safe: str, duration: float) -> Optional[float]:
+        """Cross-correlate against the first usable reference, then snap on the safe side only; else the old wide snap.
+
+        # ponytail: brief's literal pseudocode falls through to the wide default
+        # snap when every reference candidate is self/missing too, but that
+        # collides with a reference episode refining "against itself" — no other
+        # episode was even tried, so there is nothing to safely widen the search
+        # for. Distinguish "no references configured for this side at all" (old,
+        # pre-refinement behaviour: always wide-snap) from "references given but
+        # none usable for this file" (leave t untouched) from "a usable reference
+        # was tried" (narrow snap on success, wide snap when xcorr finds no
+        # shared audio) — see test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin.
+        """
+        if t is None:
+            return None
+        refs = references.get(side, [])
+        if not refs:
+            return _snap_to_silence(fp, t, duration, safe=safe)
+        for ref in refs:
+            t_ref = results.get(ref, (None, None, None))[idx]
+            if ref == fp or t_ref is None:
+                continue
+            refined = _xcorr_boundary(fp, t, ref, t_ref, "before" if safe == "before" else "after")
+            if refined is not None:
+                win = (_XCORR_SNAP_WINDOW, 0.0) if safe == "before" else (0.0, _XCORR_SNAP_WINDOW)
+                return _snap_to_silence(fp, refined, duration, safe=safe, before=win[0], after=win[1])
+            return _snap_to_silence(fp, t, duration, safe=safe)  # one reference is enough to say the audio is not there
+        return t  # every candidate was this episode itself or missing data; nothing to refine against
 
     def _refine_one(
         fp: str,
@@ -1167,15 +1294,15 @@ def _refine_results_with_silence(
 
         new_intro_start = intro_start
         if intro_start is not None and intro_start > 0.0:
-            new_intro_start = _snap_to_silence(fp, intro_start, duration, safe="after") + cut_margin
+            new_intro_start = _boundary(fp, intro_start, 0, "intro", "after", duration) + cut_margin
 
         new_intro_end = intro_end
         if intro_end is not None:
-            new_intro_end = _snap_to_silence(fp, intro_end, duration, safe="before") - cut_margin
+            new_intro_end = _boundary(fp, intro_end, 1, "intro", "before", duration) - cut_margin
 
         new_outro_start = outro_start
         if outro_start is not None:
-            new_outro_start = min(duration, _snap_to_silence(fp, outro_start, duration, safe="after") + cut_margin)
+            new_outro_start = min(duration, _boundary(fp, outro_start, 2, "outro", "after", duration) + cut_margin)
 
         if (
             new_intro_start is not None
@@ -1242,7 +1369,11 @@ def detect_by_fingerprinting(
                 filepaths, durations, search_window, min_segment, max_segment,
             )
             if result:
-                return _refine_results_with_silence(result, durations, cut_margin=cut_margin)
+                cons = get_last_consensus()
+                return _refine_results_with_silence(
+                    result, durations, cut_margin=cut_margin,
+                    references={"intro": cons.intro_refs, "outro": cons.outro_refs},
+                )
             logger.info(
                 "Chromaprint detection found no boundaries; "
                 "falling back to chroma STFT fingerprinting"

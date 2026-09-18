@@ -20,6 +20,7 @@ from tvshow_noisemaker.detector import (
     _find_common_segment_bounds,
     _find_contiguous_at_shift,
     _find_contiguous_range,
+    _log_band_spectrogram,
     _match_template_position,
     _otsu_threshold,
     _pairwise_matches,
@@ -28,6 +29,7 @@ from tvshow_noisemaker.detector import (
     _refine_results_with_silence,
     _smooth,
     _snap_to_silence,
+    _xcorr_boundary,
     detect_by_fingerprinting,
     detect_by_silence,
     get_duration,
@@ -1013,3 +1015,116 @@ def test_detect_by_fingerprinting_forwards_cut_margin_on_stft_fallback():
         detect_by_fingerprinting(["/v/a.mkv", "/v/b.mkv"], durations={"/v/a.mkv": 1300.0, "/v/b.mkv": 1300.0},
                                  cut_margin=0.25)
     assert refine.call_args.kwargs["cut_margin"] == 0.25
+
+
+# ---------------------------------------------------------------------------
+# Cross-correlation refinement against a reference episode
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_pair(seed: int = 7):
+    """(ep_pcm, ref_pcm): 6 s of different noise, then the same 6 s of shared noise, then different again."""
+    rng = np.random.default_rng(seed)
+    sr = 8000
+    shared = rng.standard_normal(6 * sr).astype(np.float32)
+    ep = np.concatenate([rng.standard_normal(6 * sr), shared, rng.standard_normal(6 * sr)]).astype(np.float32)
+    ref = np.concatenate([rng.standard_normal(6 * sr), shared, rng.standard_normal(6 * sr)]).astype(np.float32)
+    return ep, ref
+
+
+def _pcm_from(arrays):
+    """Fake _extract_audio_pcm: slice the array registered for each path."""
+    def _extract(path, start, duration, sr=8000):
+        pcm = arrays[path]
+        a = int(round(start * sr))
+        return pcm[a:a + int(round(duration * sr))]
+    return _extract
+
+
+def test_xcorr_boundary_finds_start_and_end_of_shared_audio():
+    ep, ref = _synthetic_pair()
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", side_effect=_pcm_from({"ep": ep, "ref": ref})):
+        # Raw guesses are off by ±1 s, like Chromaprint's window bias.
+        start = _xcorr_boundary("ep", 5.0, "ref", 6.8, shared="after")
+        end = _xcorr_boundary("ep", 11.0, "ref", 12.7, shared="before")
+    assert start is not None and abs(start - 6.0) < 0.15
+    assert end is not None and abs(end - 12.0) < 0.15
+
+
+def test_xcorr_boundary_returns_none_without_shared_audio():
+    rng = np.random.default_rng(1)
+    a = rng.standard_normal(18 * 8000).astype(np.float32)
+    b = rng.standard_normal(18 * 8000).astype(np.float32)
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", side_effect=_pcm_from({"ep": a, "ref": b})):
+        assert _xcorr_boundary("ep", 6.0, "ref", 6.0, shared="after") is None
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", return_value=None):
+        assert _xcorr_boundary("ep", 6.0, "ref", 6.0, shared="after") is None
+
+
+def test_log_band_spectrogram_shape_and_normalisation():
+    pcm = np.random.default_rng(0).standard_normal(8000 * 2).astype(np.float32)
+    spec = _log_band_spectrogram(pcm)
+    assert spec is not None and spec.shape[0] == 40 and 70 <= spec.shape[1] <= 80  # 2 s at 25 ms hop
+    assert np.allclose(spec.mean(axis=0), 0.0, atol=1e-4)
+    assert _log_band_spectrogram(np.zeros(100, dtype=np.float32)) is None
+
+
+def test_snap_to_silence_window_parameters_limit_the_search():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([99.7], [100.0])) as sil:
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before", before=1.0, after=0.0) == 99.7
+    assert sil.call_args.kwargs == {"seek": 99.0, "limit": 1.0}
+
+
+def test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin():
+    results = {"/v/a.mkv": (50.0, 80.0, 1200.0), "/v/r.mkv": (48.0, 78.0, 1190.0)}
+    durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
+    refs = {"intro": ["/v/r.mkv"], "outro": ["/v/r.mkv"]}
+    calls = []
+
+    def fake_xcorr(ep, t_ep, ref, t_ref, shared):
+        calls.append((ep, t_ep, ref, t_ref, shared))
+        return t_ep + 1.0  # refined boundary is 1 s later than the raw one
+
+    def fake_snap(filepath, t, duration, safe="before", before=5.0, after=2.0):
+        assert (before, after) == ((1.0, 0.0) if safe == "before" else (0.0, 1.0))  # safe side only
+        return t
+
+    with patch("tvshow_noisemaker.detector._xcorr_boundary", side_effect=fake_xcorr), \
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=fake_snap):
+        out = _refine_results_with_silence(results, durations, cut_margin=0.5, references=refs)
+    assert out["/v/a.mkv"] == (51.5, 80.5, 1201.5)
+    assert ("/v/a.mkv", 50.0, "/v/r.mkv", 48.0, "after") in calls
+    assert ("/v/a.mkv", 80.0, "/v/r.mkv", 78.0, "before") in calls
+    assert ("/v/a.mkv", 1200.0, "/v/r.mkv", 1190.0, "after") in calls
+    # The reference episode itself is refined against nothing (only one reference) → old snap path.
+    assert all(c[0] != "/v/r.mkv" for c in calls)
+
+
+def test_refine_falls_back_to_wide_snap_when_xcorr_fails():
+    results = {"/v/a.mkv": (0.0, 80.0, 1200.0), "/v/r.mkv": (0.0, 78.0, 1190.0)}
+    durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
+    with patch("tvshow_noisemaker.detector._xcorr_boundary", return_value=None), \
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda fp, t, d, safe="before", before=5.0, after=2.0: t - 0.2 if (before, after) == (5.0, 2.0) else -1.0):
+        out = _refine_results_with_silence(results, durations, cut_margin=0.0, references={"intro": ["/v/r.mkv"], "outro": ["/v/r.mkv"]})
+    assert out["/v/a.mkv"] == (0.0, 79.8, 1199.8)
+
+
+def test_chromaprint_consensus_publishes_reference_episodes():
+    # Reuse the deterministic fake extraction from test_detect_by_chromaprint_does_not_fill_unmatched_episodes:
+    # every episode matches every other on both sides, so the two references are the first two paths.
+    paths = [f"/v/e{i}.mkv" for i in range(4)]
+    durations = {p: 1300.0 for p in paths}
+
+    def fake_extract(fp, start, duration):
+        ep = paths.index(fp)
+        return np.full(200, 1 if start < 0.5 else 100, dtype=np.uint32), False
+
+    def fake_compare(fp_a, fp_b, *args, **kwargs):
+        return (10.0, 40.0), (10.0, 40.0)
+
+    with patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=fake_extract), \
+         patch("tvshow_noisemaker.detector._compare_episodes_chromaprint", side_effect=fake_compare):
+        _detect_by_chromaprint(paths, durations, search_window=300.0)
+    cons = get_last_consensus()
+    assert len(cons.intro_refs) == 2 and set(cons.intro_refs) <= set(paths)
+    assert len(cons.outro_refs) == 2 and set(cons.outro_refs) <= set(paths)
