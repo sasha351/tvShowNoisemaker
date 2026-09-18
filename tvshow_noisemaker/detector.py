@@ -1257,24 +1257,15 @@ def _refine_results_with_silence(
     references = references or {}
 
     def _boundary(fp: str, t: Optional[float], idx: int, side: str, safe: str, duration: float) -> Optional[float]:
-        """Cross-correlate against the first usable reference, then snap on the safe side only; else the old wide snap.
+        """Cross-correlate against the first usable reference, then snap on the safe side only.
 
-        # ponytail: brief's literal pseudocode falls through to the wide default
-        # snap when every reference candidate is self/missing too, but that
-        # collides with a reference episode refining "against itself" — no other
-        # episode was even tried, so there is nothing to safely widen the search
-        # for. Distinguish "no references configured for this side at all" (old,
-        # pre-refinement behaviour: always wide-snap) from "references given but
-        # none usable for this file" (leave t untouched) from "a usable reference
-        # was tried" (narrow snap on success, wide snap when xcorr finds no
-        # shared audio) — see test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin.
+        Without a usable reference (none configured, or only this episode itself /
+        references with no boundary) or when the reference has no shared audio
+        there, fall back to the wide Chromaprint-era snap.
         """
         if t is None:
             return None
-        refs = references.get(side, [])
-        if not refs:
-            return _snap_to_silence(fp, t, duration, safe=safe)
-        for ref in refs:
+        for ref in references.get(side, []):
             t_ref = results.get(ref, (None, None, None))[idx]
             if ref == fp or t_ref is None:
                 continue
@@ -1282,8 +1273,8 @@ def _refine_results_with_silence(
             if refined is not None:
                 win = (_XCORR_SNAP_WINDOW, 0.0) if safe == "before" else (0.0, _XCORR_SNAP_WINDOW)
                 return _snap_to_silence(fp, refined, duration, safe=safe, before=win[0], after=win[1])
-            return _snap_to_silence(fp, t, duration, safe=safe)  # one reference is enough to say the audio is not there
-        return t  # every candidate was this episode itself or missing data; nothing to refine against
+            break  # one reference is enough to say the audio is not there
+        return _snap_to_silence(fp, t, duration, safe=safe)
 
     def _refine_one(
         fp: str,

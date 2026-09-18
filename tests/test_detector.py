@@ -1086,7 +1086,10 @@ def test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin():
         return t_ep + 1.0  # refined boundary is 1 s later than the raw one
 
     def fake_snap(filepath, t, duration, safe="before", before=5.0, after=2.0):
-        assert (before, after) == ((1.0, 0.0) if safe == "before" else (0.0, 1.0))  # safe side only
+        if filepath == "/v/a.mkv":  # refined boundaries snap on the safe side only, within 1 s
+            assert (before, after) == ((1.0, 0.0) if safe == "before" else (0.0, 1.0))
+        else:  # the lone reference has nothing to refine against → old wide snap
+            assert (before, after) == (5.0, 2.0)
         return t
 
     with patch("tvshow_noisemaker.detector._xcorr_boundary", side_effect=fake_xcorr), \
