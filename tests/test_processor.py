@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tvshow_noisemaker.processor import (
+    _aac_encoder,
     _build_artwork_args,
+    _codec_args,
     build_output_path,
     process_file,
 )
@@ -353,16 +355,6 @@ def test_build_artwork_args_populated_for_mp3():
 # ---------------------------------------------------------------------------
 
 
-from tvshow_noisemaker.processor import _aac_encoder, _codec_args
-
-
-@pytest.fixture(autouse=True)
-def _reset_aac_probe():
-    _aac_encoder.cache_clear()
-    yield
-    _aac_encoder.cache_clear()
-
-
 def test_aac_encoder_prefers_audiotoolbox_when_listed():
     listing = " A....D aac                  AAC (Advanced Audio Coding)\n A..... aac_at               aac (AudioToolbox) (codec aac)\n"
     with patch("tvshow_noisemaker.processor.subprocess.run", return_value=MagicMock(returncode=0, stdout=listing)) as run:
@@ -376,6 +368,12 @@ def test_aac_encoder_falls_back_to_software_aac():
         assert _aac_encoder() == "aac"
     with patch("tvshow_noisemaker.processor.subprocess.run", side_effect=OSError("no ffmpeg")):
         _aac_encoder.cache_clear()
+        assert _aac_encoder() == "aac"
+
+
+def test_aac_encoder_falls_back_on_nonzero_returncode():
+    listing = " A..... aac_at               aac (AudioToolbox) (codec aac)\n"
+    with patch("tvshow_noisemaker.processor.subprocess.run", return_value=MagicMock(returncode=1, stdout=listing)):
         assert _aac_encoder() == "aac"
 
 

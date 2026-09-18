@@ -33,12 +33,14 @@ _FORMATS = {
 def _aac_encoder() -> str:
     """``aac_at`` (Apple AudioToolbox, several times faster than ffmpeg's ``aac``) when this ffmpeg has it."""
     try:
-        listing = subprocess.run(
+        result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10,
-        ).stdout
+        )
     except Exception:  # pylint: disable=broad-except
         return "aac"
-    return "aac_at" if " aac_at " in listing else "aac"
+    if result.returncode != 0:
+        return "aac"
+    return "aac_at" if " aac_at " in result.stdout else "aac"
 
 
 def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
