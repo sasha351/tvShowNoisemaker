@@ -1191,3 +1191,365 @@ Acceptance vs. the spec:
 - `FamilyGuy02` S02E05 and S02E20 are `review` with `no credits match` — passes; both rows show `review` and the flag `no credits match (season credits 20 s)`.
 - `Friends03` episodes are `high` with the flag `no shared credits found in this season` — passes; all 25 rows are `high` and carry that flag.
 - `max |intro_end| error` on `high` episodes ≤ 1.0s — **fails**. Filtering the per-row `high`-confidence episodes only (the printed summary line mixes in `review` rows), the max is **2.31s** on `FamilyGuy02/Family Guy - S02E10 - Running Mates.mkv` (i_end −2.31, the only `high` FamilyGuy02 episode); next highest is `Friends03/S03E16` at 2.18s. Both exceed the 1.0s spec target. Not tuned; reported as found — controller decides whether Phase 2.5 cross-correlation refinement is needed.
+
+---
+
+## Phase 2.5 — Cross-correlation boundary refinement (added after the Task 5 gate)
+
+The Task 5 gate (above) failed on precision, not on decisions: raw Chromaprint boundaries carry a
+systematic window bias (intro_end 0.9–1.8 s early, credits start 2–4 s late, intro_start ±1 s,
+measured with `_refine_results_with_silence` disabled), and the ±5 s silence snap then moved some
+intro_starts *earlier* into cold-open dialogue (Friends S03E04 −2.41 s). A spectrogram
+cross-correlation prototype against a reference episode (scratch `proto2.py`, threshold sweep on all
+three shows) brings Family Guy intro boundaries to within 0.5 s and credits to within 1.6 s with
+zero failures across 130 boundaries. Threshold 0.7 was chosen because it errs toward keeping theme.
+
+### Task 6: Refine fingerprint boundaries by spectrogram cross-correlation
+
+**Files:**
+- Modify: `tvshow_noisemaker/detector.py` — new constants next to `_REFINE_*` (~line 78); new
+  `_log_band_spectrogram`, `_xcorr_boundary` placed just before `_snap_to_silence`;
+  `_snap_to_silence` gains `before`/`after` window parameters; `_refine_results_with_silence`
+  gains `references`; `SeasonConsensus` gains `intro_refs`/`outro_refs`; `_detect_by_chromaprint`
+  fills them; `detect_by_fingerprinting` passes references on the Chromaprint path only.
+- Test: `tests/test_detector.py`
+
+**Interfaces:**
+- Consumes: `_extract_audio_pcm(filepath, start, duration, sr) -> Optional[np.ndarray]` (float32 mono),
+  `_run_silencedetect`, `_Consensus.support`, `SeasonConsensus`, `get_last_consensus()`.
+- Produces:
+  - `_log_band_spectrogram(pcm: np.ndarray) -> Optional[np.ndarray]` — shape `(40, T)`, 25 ms hop, per-frame z-normalised; `None` when `pcm` is shorter than one FFT frame.
+  - `_xcorr_boundary(ep_path: str, t_ep: float, ref_path: str, t_ref: float, shared: str) -> Optional[float]` — `shared="before"` means the shared audio ends at the boundary (intro_end); `"after"` means it begins there (intro_start, outro_start). Returns the refined time in *ep_path* seconds, or `None` when either extraction fails or the probe point is not similar (no shared audio where expected).
+  - `_snap_to_silence(filepath, t, duration, safe="before", before=_REFINE_WINDOW_BEFORE, after=_REFINE_WINDOW_AFTER) -> float` — unchanged behaviour with the defaults.
+  - `_refine_results_with_silence(results, durations, cut_margin=0.5, references=None)` — `references: Optional[Dict[str, List[str]]]` with keys `"intro"` and `"outro"`, each the reference episode paths in preference order (an episode never references itself; the first reference with a non-`None` raw boundary is used).
+  - `SeasonConsensus.intro_refs: List[str]`, `SeasonConsensus.outro_refs: List[str]` — the two episodes with the highest support on each side (ties by path order), empty when there is no consensus.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_detector.py` (add `_log_band_spectrogram`, `_xcorr_boundary`, `SeasonConsensus` to the import list if missing):
+
+```python
+def _synthetic_pair(seed: int = 7):
+    """(ep_pcm, ref_pcm): 6 s of different noise, then the same 6 s of shared noise, then different again."""
+    rng = np.random.default_rng(seed)
+    sr = 8000
+    shared = rng.standard_normal(6 * sr).astype(np.float32)
+    ep = np.concatenate([rng.standard_normal(6 * sr), shared, rng.standard_normal(6 * sr)]).astype(np.float32)
+    ref = np.concatenate([rng.standard_normal(6 * sr), shared, rng.standard_normal(6 * sr)]).astype(np.float32)
+    return ep, ref
+
+
+def _pcm_from(arrays):
+    """Fake _extract_audio_pcm: slice the array registered for each path."""
+    def _extract(path, start, duration, sr=8000):
+        pcm = arrays[path]
+        a = int(round(start * sr))
+        return pcm[a:a + int(round(duration * sr))]
+    return _extract
+
+
+def test_xcorr_boundary_finds_start_and_end_of_shared_audio():
+    ep, ref = _synthetic_pair()
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", side_effect=_pcm_from({"ep": ep, "ref": ref})):
+        # Raw guesses are off by ±1 s, like Chromaprint's window bias.
+        start = _xcorr_boundary("ep", 5.0, "ref", 6.8, shared="after")
+        end = _xcorr_boundary("ep", 11.0, "ref", 12.7, shared="before")
+    assert start is not None and abs(start - 6.0) < 0.15
+    assert end is not None and abs(end - 12.0) < 0.15
+
+
+def test_xcorr_boundary_returns_none_without_shared_audio():
+    rng = np.random.default_rng(1)
+    a = rng.standard_normal(18 * 8000).astype(np.float32)
+    b = rng.standard_normal(18 * 8000).astype(np.float32)
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", side_effect=_pcm_from({"ep": a, "ref": b})):
+        assert _xcorr_boundary("ep", 6.0, "ref", 6.0, shared="after") is None
+    with patch("tvshow_noisemaker.detector._extract_audio_pcm", return_value=None):
+        assert _xcorr_boundary("ep", 6.0, "ref", 6.0, shared="after") is None
+
+
+def test_log_band_spectrogram_shape_and_normalisation():
+    pcm = np.random.default_rng(0).standard_normal(8000 * 2).astype(np.float32)
+    spec = _log_band_spectrogram(pcm)
+    assert spec is not None and spec.shape[0] == 40 and 70 <= spec.shape[1] <= 80  # 2 s at 25 ms hop
+    assert np.allclose(spec.mean(axis=0), 0.0, atol=1e-4)
+    assert _log_band_spectrogram(np.zeros(100, dtype=np.float32)) is None
+
+
+def test_snap_to_silence_window_parameters_limit_the_search():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([99.7], [100.0])) as sil:
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before", before=1.0, after=0.0) == 99.7
+    assert sil.call_args.kwargs == {"seek": 99.0, "limit": 1.0}
+
+
+def test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin():
+    results = {"/v/a.mkv": (50.0, 80.0, 1200.0), "/v/r.mkv": (48.0, 78.0, 1190.0)}
+    durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
+    refs = {"intro": ["/v/r.mkv"], "outro": ["/v/r.mkv"]}
+    calls = []
+
+    def fake_xcorr(ep, t_ep, ref, t_ref, shared):
+        calls.append((ep, t_ep, ref, t_ref, shared))
+        return t_ep + 1.0  # refined boundary is 1 s later than the raw one
+
+    def fake_snap(filepath, t, duration, safe="before", before=5.0, after=2.0):
+        assert (before, after) == ((1.0, 0.0) if safe == "before" else (0.0, 1.0))  # safe side only
+        return t
+
+    with patch("tvshow_noisemaker.detector._xcorr_boundary", side_effect=fake_xcorr), \
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=fake_snap):
+        out = _refine_results_with_silence(results, durations, cut_margin=0.5, references=refs)
+    assert out["/v/a.mkv"] == (51.5, 80.5, 1201.5)
+    assert ("/v/a.mkv", 50.0, "/v/r.mkv", 48.0, "after") in calls
+    assert ("/v/a.mkv", 80.0, "/v/r.mkv", 78.0, "before") in calls
+    assert ("/v/a.mkv", 1200.0, "/v/r.mkv", 1190.0, "after") in calls
+    # The reference episode itself is refined against nothing (only one reference) → old snap path.
+    assert all(c[0] != "/v/r.mkv" for c in calls)
+
+
+def test_refine_falls_back_to_wide_snap_when_xcorr_fails():
+    results = {"/v/a.mkv": (0.0, 80.0, 1200.0), "/v/r.mkv": (0.0, 78.0, 1190.0)}
+    durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
+    with patch("tvshow_noisemaker.detector._xcorr_boundary", return_value=None), \
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda fp, t, d, safe="before", before=5.0, after=2.0: t - 0.2 if (before, after) == (5.0, 2.0) else -1.0):
+        out = _refine_results_with_silence(results, durations, cut_margin=0.0, references={"intro": ["/v/r.mkv"], "outro": ["/v/r.mkv"]})
+    assert out["/v/a.mkv"] == (0.0, 79.8, 1199.8)
+
+
+def test_chromaprint_consensus_publishes_reference_episodes():
+    # Reuse the deterministic fake extraction from test_detect_by_chromaprint_does_not_fill_unmatched_episodes:
+    # every episode matches every other on both sides, so the two references are the first two paths.
+    paths = [f"/v/e{i}.mkv" for i in range(4)]
+    durations = {p: 1300.0 for p in paths}
+
+    def fake_extract(fp, start, duration):
+        ep = paths.index(fp)
+        return np.full(200, 1 if start < 0.5 else 100, dtype=np.uint32), False
+
+    def fake_compare(fp_a, fp_b, *args, **kwargs):
+        return (10.0, 40.0), (10.0, 40.0)
+
+    with patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=fake_extract), \
+         patch("tvshow_noisemaker.detector._compare_episodes_chromaprint", side_effect=fake_compare):
+        _detect_by_chromaprint(paths, durations, search_window=300.0)
+    cons = get_last_consensus()
+    assert len(cons.intro_refs) == 2 and set(cons.intro_refs) <= set(paths)
+    assert len(cons.outro_refs) == 2 and set(cons.outro_refs) <= set(paths)
+```
+
+Adapt the last test's fakes to whatever signature `_compare_episodes_chromaprint` and `_extract_chromaprint` have in `test_detect_by_chromaprint_does_not_fill_unmatched_episodes` (copy that test's fakes; only the assertions differ).
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `.venv/bin/python -m pytest -q tests/test_detector.py -k "xcorr or log_band or window_parameters or refine_uses or falls_back_to_wide or publishes_reference"`
+Expected: ImportError / TypeError (new names and parameters do not exist yet).
+
+- [ ] **Step 3: Constants and helpers**
+
+In `tvshow_noisemaker/detector.py`, after the `_REFINE_*` constants:
+
+```python
+# Cross-correlation refinement of Chromaprint boundaries against a reference episode.
+_XCORR_SR = 8000
+_XCORR_HOP = 200                 # 25 ms frames
+_XCORR_NFFT = 1024
+_XCORR_WINDOW = 6.0              # seconds on each side of the raw boundary
+_XCORR_MAX_LAG = 2.0             # seconds; raw boundaries of two episodes disagree by less than this
+_XCORR_SIM_THRESHOLD = 0.7       # ponytail: calibration knob — 0.7 errs toward keeping theme (measured on 3 shows)
+_XCORR_SMOOTH = 8                # frames (0.2 s) of similarity smoothing
+_XCORR_PROBE = 2.5               # seconds inside the shared region where similarity must already be high
+_XCORR_SNAP_WINDOW = 1.0         # seconds; refined boundaries only snap to a silence this close, safe side only
+```
+
+Just before `_snap_to_silence`:
+
+```python
+def _log_band_spectrogram(pcm: np.ndarray) -> Optional[np.ndarray]:
+    """40 log-spaced bands × 25 ms frames, each frame z-normalised, so a frame-wise dot product is a cosine similarity."""
+    if pcm is None or pcm.size < _XCORR_NFFT:
+        return None
+    frames = np.lib.stride_tricks.sliding_window_view(pcm, _XCORR_NFFT)[::_XCORR_HOP] * np.hanning(_XCORR_NFFT)
+    mag = np.abs(np.fft.rfft(frames, axis=1)).T  # (513, T)
+    edges = np.unique(np.geomspace(4, 512, 41).astype(int))
+    bands = np.stack([mag[edges[i]:edges[i + 1]].mean(axis=0) for i in range(len(edges) - 1)])
+    spec = np.log1p(bands * 100.0)
+    spec -= spec.mean(axis=0, keepdims=True)
+    spec /= spec.std(axis=0, keepdims=True) + 1e-6
+    return spec
+
+
+def _xcorr_boundary(ep_path: str, t_ep: float, ref_path: str, t_ref: float, shared: str) -> Optional[float]:
+    """Move *t_ep* to where the audio shared with *ref_path* really starts or ends.
+
+    Both files are decoded from ``t - pre`` to ``t + _XCORR_WINDOW`` (same *pre* so the raw
+    boundaries line up), the best lag within ±_XCORR_MAX_LAG aligns them, and the boundary is the
+    edge of the run of frames whose similarity exceeds _XCORR_SIM_THRESHOLD, walked outward from a
+    probe point _XCORR_PROBE s inside the shared side.  *shared* is ``"before"`` when the shared
+    audio ends at the boundary (intro_end) and ``"after"`` when it begins there (intro_start,
+    outro_start).  Returns ``None`` when audio cannot be decoded or the probe point is not similar.
+    """
+    fps = _XCORR_SR / _XCORR_HOP
+    pre = min(_XCORR_WINDOW, t_ep, t_ref)
+    ref_spec = _log_band_spectrogram(_extract_audio_pcm(ref_path, t_ref - pre, pre + _XCORR_WINDOW, sr=_XCORR_SR))
+    ep_spec = _log_band_spectrogram(_extract_audio_pcm(ep_path, t_ep - pre, pre + _XCORR_WINDOW, sr=_XCORR_SR))
+    if ref_spec is None or ep_spec is None:
+        return None
+    n = min(ref_spec.shape[1], ep_spec.shape[1])
+    ref_spec, ep_spec = ref_spec[:, :n], ep_spec[:, :n]
+
+    max_lag = int(_XCORR_MAX_LAG * fps)
+    best_lag, best_score = 0, -np.inf
+    for lag in range(-max_lag, max_lag + 1):  # ep[t] ~ ref[t + lag]
+        a0, b0 = max(0, lag), max(0, -lag)
+        m = n - abs(lag)
+        if m <= 0:
+            continue
+        score = float((ref_spec[:, a0:a0 + m] * ep_spec[:, b0:b0 + m]).mean())
+        if score > best_score:
+            best_lag, best_score = lag, score
+    a0, b0 = max(0, best_lag), max(0, -best_lag)
+    m = n - abs(best_lag)
+    sim = (ref_spec[:, a0:a0 + m] * ep_spec[:, b0:b0 + m]).mean(axis=0)
+    smooth = np.convolve(sim, np.ones(_XCORR_SMOOTH) / _XCORR_SMOOTH, mode="same")
+    good = smooth > _XCORR_SIM_THRESHOLD
+
+    centre = int(round(pre * fps)) - b0  # frame of t_ep in the aligned ep spectrogram
+    probe = int(_XCORR_PROBE * fps)
+    if shared == "before":
+        i = centre - probe
+        if i < 0 or i >= m or not good[i]:
+            return None
+        while i + 1 < m and good[i + 1]:
+            i += 1
+        edge = i + 1
+    else:
+        i = centre + probe
+        if i < 0 or i >= m or not good[i]:
+            return None
+        while i - 1 >= 0 and good[i - 1]:
+            i -= 1
+        edge = i
+    return (t_ep - pre) + (edge + b0) * _XCORR_HOP / _XCORR_SR
+```
+
+- [ ] **Step 4: Snap window parameters**
+
+Change the signature and the two uses of the window constants inside `_snap_to_silence`:
+
+```python
+def _snap_to_silence(
+    filepath: str, t: float, duration: float, safe: str = "before",
+    before: float = _REFINE_WINDOW_BEFORE, after: float = _REFINE_WINDOW_AFTER,
+) -> float:
+```
+
+with `if t <= before or t >= duration - after: return t` and `seek=t - before, limit=before + after`. Docstring: the window is `[t − before, t + after]`. Everything else stays.
+
+- [ ] **Step 5: Wire references through the refine step**
+
+`_refine_results_with_silence(results, durations, cut_margin=0.5, references=None)`. Inside `_refine_one`, replace the three snap lines with a helper defined inside `_refine_results_with_silence`:
+
+```python
+    references = references or {}
+
+    def _boundary(fp: str, t: Optional[float], idx: int, side: str, safe: str, duration: float) -> Optional[float]:
+        """Cross-correlate against the first usable reference, then snap on the safe side only; else the old wide snap."""
+        if t is None:
+            return None
+        for ref in references.get(side, []):
+            t_ref = results.get(ref, (None, None, None))[idx]
+            if ref == fp or t_ref is None:
+                continue
+            refined = _xcorr_boundary(fp, t, ref, t_ref, "before" if safe == "before" else "after")
+            if refined is not None:
+                win = (_XCORR_SNAP_WINDOW, 0.0) if safe == "before" else (0.0, _XCORR_SNAP_WINDOW)
+                return _snap_to_silence(fp, refined, duration, safe=safe, before=win[0], after=win[1])
+            break  # one reference is enough to say the audio is not there
+        return _snap_to_silence(fp, t, duration, safe=safe)
+```
+
+and in `_refine_one`:
+
+```python
+        new_intro_start = intro_start
+        if intro_start is not None and intro_start > 0.0:
+            new_intro_start = _boundary(fp, intro_start, 0, "intro", "after", duration) + cut_margin
+        new_intro_end = intro_end
+        if intro_end is not None:
+            new_intro_end = _boundary(fp, intro_end, 1, "intro", "before", duration) - cut_margin
+        new_outro_start = outro_start
+        if outro_start is not None:
+            new_outro_start = min(duration, _boundary(fp, outro_start, 2, "outro", "after", duration) + cut_margin)
+```
+
+The ordering guard and the thread pool stay as they are. Update the docstring: cross-correlation first when references are given, then a 1 s safe-side snap; otherwise the ±5/2 s snap.
+
+- [ ] **Step 6: Publish references from the consensus**
+
+In `SeasonConsensus` add `intro_refs: List[str] = field(default_factory=list)` and `outro_refs: List[str] = field(default_factory=list)`. In `_detect_by_chromaprint`, where `consensus = SeasonConsensus(...)` is built:
+
+```python
+    def _top_refs(support: Dict[str, int]) -> List[str]:
+        return [fp for fp, _ in sorted(support.items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
+
+    consensus = SeasonConsensus(
+        intro_len=intro.median_len, outro_len=outro.median_len,
+        intro_episodes=len(intro.segments), outro_episodes=len(outro.segments),
+        intro_refs=_top_refs(intro.support), outro_refs=_top_refs(outro.support),
+    )
+```
+
+In `detect_by_fingerprinting`, the Chromaprint branch becomes:
+
+```python
+            if result:
+                cons = get_last_consensus()
+                return _refine_results_with_silence(
+                    result, durations, cut_margin=cut_margin,
+                    references={"intro": cons.intro_refs, "outro": cons.outro_refs},
+                )
+```
+
+The STFT fallback keeps calling without references.
+
+- [ ] **Step 7: Run the detector tests**
+
+Run: `.venv/bin/python -m pytest -q tests/test_detector.py`
+Expected: all pass. `test_refine_snaps_each_boundary_toward_its_safe_side_then_applies_margin` and friends call without `references`, so they keep exercising the old path unchanged.
+
+- [ ] **Step 8: Benchmark**
+
+Run: `.venv/bin/python tools/bench_detection.py 2>/dev/null | tail -9`
+Expected (from the prototype): `clipped dialogue` well under the current 13, `no-intro episodes cut anyway: 0`, `review episodes: 9`, max |intro_end| error on `high` episodes about 1 s, mean errors under 0.5 s on intro boundaries. Record the block in your report. If `clipped dialogue` does not drop or any `high` episode has |intro_start| or |intro_end| error above 1.5 s, stop and report; do not tune the constants.
+
+- [ ] **Step 9: Full suite and commit**
+
+```bash
+.venv/bin/python -m pytest -q
+GIT=/Library/Developer/CommandLineTools/usr/bin/git
+$GIT add tvshow_noisemaker/detector.py tests/test_detector.py
+$GIT commit -m "feat: refine fingerprint boundaries by spectrogram cross-correlation against a reference episode
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: Re-gate and update the recorded results
+
+**Files:**
+- Modify: `docs/superpowers/plans/2026-09-17-v2-detection.md` — replace the `## Results (Phase 2 gate, 2026-09-17)` block with the new run (same layout: summary block, per-show header lines, every review/CLIPPED/UNDETECTED row, acceptance table), keeping the old summary block under a `### Before Phase 2.5` sub-heading for comparison.
+- Modify: `README.md` — one sentence in the consensus paragraph: boundaries are then refined by cross-correlating each episode's audio against a reference episode, so cuts land within about a second.
+- Modify: `.claude/skills/verify/SKILL.md` — update the expected-per-show numbers to the new run.
+
+- [ ] **Step 1:** `.venv/bin/python tools/bench_detection.py 2>/dev/null | tee <scratchpad>/bench_phase25.txt`
+- [ ] **Step 2:** Update the three files as listed. Acceptance to report against (from the spec): `clipped dialogue: 0`; `no-intro episodes cut anyway: 0`; TopGear05 and FamilyGuy02 S02E13 never cut an intro; FamilyGuy02 S02E05/S02E20 review with `no credits match`; Friends03 `high` with `no shared credits found in this season`; max |intro_end| error on `high` ≤ 1.0 s. State pass/fail per line with the actual numbers; where a line fails, list the episodes and the signed errors so the direction (safe or not) is visible.
+- [ ] **Step 3:** `.venv/bin/python -m pytest -q`, then commit:
+
+```bash
+GIT=/Library/Developer/CommandLineTools/usr/bin/git
+$GIT add docs/superpowers/plans/2026-09-17-v2-detection.md README.md .claude/skills/verify/SKILL.md
+$GIT commit -m "docs: Phase 2.5 benchmark results after cross-correlation refinement
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
