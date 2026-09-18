@@ -23,8 +23,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 from tvshow_noisemaker.artwork import resolve_artwork
 from tvshow_noisemaker.config import Config
 from tvshow_noisemaker.detector import (
+    MatchInfo,
+    SeasonConsensus,
     detect_by_fingerprinting,
     get_duration,
+    get_last_consensus,
     get_last_fingerprint_stats,
     resolve_boundaries,
 )
@@ -34,6 +37,8 @@ from tvshow_noisemaker.processor import build_output_path, process_file
 logger = logging.getLogger(__name__)
 
 PLAN_VERSION = 1
+
+_CONSENSUS_LEN_TOLERANCE = 3.0  # s; an episode's raw match must be this close to the season length to be trusted
 
 # Video formats supported by ffmpeg that we accept as input.
 VIDEO_EXTENSIONS = {
@@ -196,56 +201,109 @@ def _resolve_episode(
     duration: Optional[float],
     fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]],
     cfg: Config,
+    consensus: SeasonConsensus,
 ) -> EpisodePlan:
-    """Resolve one episode's boundaries and decide whether it can be encoded."""
+    """Resolve one episode's boundaries, confidence and flags."""
     ep = EpisodePlan(path=fp, duration=duration)
     try:
-        intro_start, intro_end, outro_start = resolve_boundaries(
-            fp, cfg=cfg, fingerprint_results=fingerprint_results, duration=duration,
-        )
-        ep.intro_start, ep.intro_end, ep.outro_start = intro_start, intro_end, outro_start
-
         ts = cfg.timestamps.get(ep.basename, {})
         has_timestamp_override = ts.get("intro_end") is not None or ts.get("outro_start") is not None
         has_user_duration_override = cfg.intro_duration is not None or cfg.outro_duration is not None
-        _, fp_ie, fp_os = fingerprint_results.get(fp, (None, None, None))
-        has_fingerprint_boundary = fp_ie is not None or fp_os is not None
 
-        if has_timestamp_override or has_user_duration_override:
-            ep.source = "config"
-        elif has_fingerprint_boundary:
-            ep.source = "fingerprint"
+        if fp in fingerprint_results and not has_timestamp_override:
+            _resolve_from_consensus(ep, fingerprint_results[fp], consensus.episodes.get(fp, MatchInfo()), consensus)
         else:
-            ep.source = "silence"
+            ep.intro_start, ep.intro_end, ep.outro_start = resolve_boundaries(
+                fp, cfg=cfg, fingerprint_results=fingerprint_results, duration=duration,
+            )
+            if has_timestamp_override or has_user_duration_override:
+                ep.source = "config"
+            else:
+                ep.source = "silence"
+                ep.confidence = "review"
+                ep.flags.append("silence detection only (no fingerprint match)")
 
-        # No strategy produced boundaries: skip rather than convert the whole file.
-        is_unresolved_defaults = (
+        # Nothing to cut at either end and no explicit user choice: skip rather than convert the whole file.
+        nothing_detected = (
             duration is not None
-            and intro_end is not None
-            and outro_start is not None
-            and abs(intro_end) < 1e-6
-            and abs(outro_start - duration) < 1e-3
+            and ep.intro_end is not None and abs(ep.intro_end) < 1e-6
+            and ep.outro_start is not None and abs(ep.outro_start - duration) < 1e-3
         )
-        if (
-            is_unresolved_defaults
-            and not has_timestamp_override
-            and not has_user_duration_override
-            and not has_fingerprint_boundary
-        ):
+        if nothing_detected and ep.source != "config":
             ep.confidence = "skip"
-            ep.flags.append("No intro/outro boundaries detected (skipped to avoid full-file conversion)")
+            # Skip reasons go first: encode() and the log report flags[0].
+            ep.flags.insert(0, "No intro/outro boundaries detected (skipped to avoid full-file conversion)")
             return ep
 
         # A None boundary just leaves `encodable` False; only compare when both are known.
-        if intro_end is not None and outro_start is not None and outro_start <= intro_end:
+        if ep.intro_end is not None and ep.outro_start is not None and ep.outro_start <= ep.intro_end:
             ep.confidence = "skip"
-            ep.flags.append(
-                f"Invalid boundaries: intro_end={intro_end:.2f}s >= outro_start={outro_start:.2f}s"
+            ep.flags.insert(
+                0, f"Invalid boundaries: intro_end={ep.intro_end:.2f}s >= outro_start={ep.outro_start:.2f}s",
             )
     except Exception as exc:  # pylint: disable=broad-except
         ep.confidence = "skip"
         ep.flags = [f"Boundary detection error: {exc}"]
     return ep
+
+
+def _resolve_from_consensus(
+    ep: EpisodePlan,
+    boundaries: Tuple[Optional[float], Optional[float], Optional[float]],
+    info: MatchInfo,
+    consensus: SeasonConsensus,
+) -> None:
+    """Apply the decision table: use matched boundaries, flag weak ones, never fill silently."""
+    intro_start, intro_end, outro_start = boundaries
+    ep.source = "fingerprint"
+
+    if intro_end is None and consensus.intro_len is None:
+        ep.intro_start, ep.intro_end = None, 0.0
+        ep.flags.append("no shared intro found in this season")
+    elif intro_end is None:
+        ep.intro_start, ep.intro_end = None, None
+        ep.confidence = "review"
+        ep.flags.append(f"no intro match (season intro {consensus.intro_len:.0f} s)")
+    else:
+        ep.intro_start, ep.intro_end = intro_start, intro_end
+        if info.intro_support < 2:
+            ep.confidence = "review"
+            ep.flags.append("intro matched 1 episode only")
+        if (
+            info.intro_len is not None and consensus.intro_len is not None
+            and abs(info.intro_len - consensus.intro_len) > _CONSENSUS_LEN_TOLERANCE
+        ):
+            ep.confidence = "review"
+            ep.flags.append(f"intro length {info.intro_len:.0f} s vs season {consensus.intro_len:.0f} s")
+    if info.intro_outliers:
+        ep.flags.append(
+            f"ignored {len(info.intro_outliers)} other shared segment(s) near the start "
+            f"({', '.join(f'{x:.0f} s' for x in info.intro_outliers)})"
+        )
+
+    if outro_start is None and consensus.outro_len is None:
+        ep.outro_start = ep.duration
+        ep.flags.append("no shared credits found in this season")
+    elif outro_start is None:
+        ep.outro_start = None
+        ep.confidence = "review"
+        ep.flags.append(f"no credits match (season credits {consensus.outro_len:.0f} s)")
+    else:
+        ep.outro_start = outro_start
+        if info.outro_support < 2:
+            ep.confidence = "review"
+            ep.flags.append("credits matched 1 episode only")
+        if (
+            info.outro_len is not None and consensus.outro_len is not None
+            and abs(info.outro_len - consensus.outro_len) > _CONSENSUS_LEN_TOLERANCE
+        ):
+            ep.confidence = "review"
+            ep.flags.append(f"credits length {info.outro_len:.0f} s vs season {consensus.outro_len:.0f} s")
+    if info.outro_outliers:
+        ep.flags.append(
+            f"ignored {len(info.outro_outliers)} other shared segment(s) near the end "
+            f"({', '.join(f'{x:.0f} s' for x in info.outro_outliers)})"
+        )
 
 
 def _log_episode(
@@ -263,6 +321,8 @@ def _log_episode(
             fp_ie if fp_ie is not None else 0.0,
             f"{fp_os:.1f}s" if fp_os is not None else "N/A",
         )
+    for flag in ep.flags:
+        logger.info("  %s %s", "⚠" if ep.confidence != "high" else "·", flag)
     if ep.confidence == "skip":
         logger.warning("  ✗ Skipped – %s", ep.flags[0] if ep.flags else "not encodable")
         return
@@ -293,6 +353,7 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
     plan.stage_timings["probe"] = time.monotonic() - t0
 
     fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
+    consensus = SeasonConsensus()
     t0 = time.monotonic()
     if cfg.use_fingerprinting and len(files) >= 2:
         progress("fingerprint", 0, len(files), "Fingerprinting…")
@@ -301,6 +362,7 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
                 files, durations=durations, search_window=cfg.fingerprint_search_window,
             )
             plan.fingerprint_stats = get_last_fingerprint_stats()
+            consensus = get_last_consensus()
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
                 "Fingerprinting failed: %s – falling back to silence detection "
@@ -315,7 +377,7 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
     done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {
-            pool.submit(_resolve_episode, fp, durations.get(fp), fingerprint_results, cfg): fp
+            pool.submit(_resolve_episode, fp, durations.get(fp), fingerprint_results, cfg, consensus): fp
             for fp in files
         }
         for future in concurrent.futures.as_completed(future_map):

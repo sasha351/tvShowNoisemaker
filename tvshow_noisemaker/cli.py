@@ -337,6 +337,12 @@ def run(args: argparse.Namespace) -> int:
         if cfg.use_fingerprinting and len(video_files) >= 2:
             con.info("Running audio fingerprinting across %d episodes…", len(video_files))
         plan = detect(str(input_dir), cfg)
+        n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
+        if n_review:
+            con.warning(
+                "%d episode(s) flagged for review; those without complete boundaries are skipped "
+                "(reasons in the log file)", n_review,
+            )
         if cfg.use_fingerprinting and len(video_files) >= 2 and not plan.fingerprint_stats:
             con.warning(
                 "Fingerprinting failed – fell back to silence detection "
@@ -361,9 +367,10 @@ def run(args: argparse.Namespace) -> int:
     if detect_only:
         plan.save(detect_only)
         n_skip = sum(1 for ep in plan.episodes if ep.confidence == "skip")
+        n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
         con.info(
-            "Plan written to %s (%d episodes, %d to encode, %d skipped)",
-            detect_only, len(plan.episodes), len(plan.to_encode), n_skip,
+            "Plan written to %s (%d episodes, %d to encode, %d for review, %d skipped)",
+            detect_only, len(plan.episodes), len(plan.to_encode), n_review, n_skip,
         )
         return 0
 

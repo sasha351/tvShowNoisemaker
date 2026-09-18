@@ -9,10 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from tvshow_noisemaker.config import Config
+from tvshow_noisemaker.detector import MatchInfo, SeasonConsensus
 from tvshow_noisemaker.pipeline import (
     EpisodePlan,
     Plan,
     Summary,
+    _resolve_episode,
     default_encode_workers,
     detect,
     encode,
@@ -81,6 +83,123 @@ def test_summary_defaults():
     assert s.cancelled is False
 
 
+def _consensus(fp, intro_support=2, outro_support=2, intro_len=30.0, outro_len=50.0,
+               season_intro=30.0, season_outro=50.0, intro_outliers=(), outro_outliers=()):
+    return SeasonConsensus(
+        intro_len=season_intro, outro_len=season_outro, intro_episodes=5, outro_episodes=5,
+        episodes={fp: MatchInfo(intro_support, outro_support, intro_len, outro_len,
+                                list(intro_outliers), list(outro_outliers))},
+    )
+
+
+def test_resolve_episode_high_when_both_boundaries_agree_with_season():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 2650.0)}, Config(), _consensus(fp))
+    assert (ep.intro_start, ep.intro_end, ep.outro_start) == (0.0, 30.0, 2650.0)
+    assert ep.confidence == "high" and ep.source == "fingerprint" and ep.flags == []
+
+
+def test_resolve_episode_no_intro_in_season_keeps_everything_before_credits():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (None, None, 2650.0)}, Config(),
+                          _consensus(fp, intro_support=0, intro_len=None, season_intro=None))
+    assert (ep.intro_start, ep.intro_end, ep.outro_start) == (None, 0.0, 2650.0)
+    assert ep.confidence == "high"
+    assert ep.flags == ["no shared intro found in this season"]
+
+
+def test_resolve_episode_no_credits_in_season_keeps_the_tail():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, None)}, Config(),
+                          _consensus(fp, outro_support=0, outro_len=None, season_outro=None))
+    assert ep.outro_start == 2700.0 and ep.confidence == "high"
+    assert ep.flags == ["no shared credits found in this season"]
+
+
+def test_resolve_episode_unmatched_intro_is_review_not_filled():
+    fp = "/v/ep13.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (None, None, 2650.0)}, Config(),
+                          _consensus(fp, intro_support=0, intro_len=None, season_intro=31.2))
+    assert ep.intro_start is None and ep.intro_end is None and ep.outro_start == 2650.0
+    assert ep.confidence == "review"
+    assert ep.flags == ["no intro match (season intro 31 s)"]
+    assert ep.encodable is False
+
+
+def test_resolve_episode_unmatched_credits_is_review():
+    fp = "/v/ep05.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, None)}, Config(),
+                          _consensus(fp, outro_support=0, outro_len=None, season_outro=39.0))
+    assert ep.outro_start is None and ep.confidence == "review"
+    assert ep.flags == ["no credits match (season credits 39 s)"]
+
+
+def test_resolve_episode_single_pair_support_is_review():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 2650.0)}, Config(),
+                          _consensus(fp, intro_support=1, outro_support=1))
+    assert ep.confidence == "review"
+    assert ep.flags == ["intro matched 1 episode only", "credits matched 1 episode only"]
+
+
+def test_resolve_episode_length_far_from_season_is_review():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 48.0, 2679.0)}, Config(),
+                          _consensus(fp, intro_len=48.0, outro_len=21.0, season_intro=31.0, season_outro=39.0))
+    assert ep.confidence == "review"
+    assert ep.flags == ["intro length 48 s vs season 31 s", "credits length 21 s vs season 39 s"]
+
+
+def test_resolve_episode_outliers_are_informational():
+    fp = "/v/ep02.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 2650.0)}, Config(),
+                          _consensus(fp, intro_outliers=[45.0], outro_outliers=[12.0, 13.5]))
+    assert ep.confidence == "high"
+    assert ep.flags == [
+        "ignored 1 other shared segment(s) near the start (45 s)",
+        "ignored 2 other shared segment(s) near the end (12 s, 14 s)",
+    ]
+
+
+def test_resolve_episode_config_timestamps_win_over_fingerprint():
+    fp = "/v/ep01.mkv"
+    cfg = Config(timestamps={"ep01.mkv": {"intro_end": 40.0, "outro_start": 2600.0}})
+    with patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 40.0, 2600.0)) as rb:
+        ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 2650.0)}, cfg, _consensus(fp))
+    rb.assert_called_once()
+    assert (ep.intro_end, ep.outro_start, ep.source, ep.confidence) == (40.0, 2600.0, "config", "high")
+
+
+def test_resolve_episode_without_fingerprint_uses_silence_and_is_review():
+    fp = "/v/ep01.mkv"
+    with patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 25.0, 2660.0)) as rb:
+        ep = _resolve_episode(fp, 2700.0, {}, Config(), SeasonConsensus())
+    rb.assert_called_once()
+    assert (ep.intro_end, ep.outro_start, ep.source, ep.confidence) == (25.0, 2660.0, "silence", "review")
+    assert ep.flags == ["silence detection only (no fingerprint match)"]
+
+
+def test_resolve_episode_user_durations_are_config_and_high():
+    fp = "/v/ep01.mkv"
+    with patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2670.0)):
+        ep = _resolve_episode(fp, 2700.0, {}, Config(intro_duration=30.0, outro_duration=30.0), SeasonConsensus())
+    assert (ep.source, ep.confidence, ep.flags) == ("config", "high", [])
+
+
+def test_resolve_episode_nothing_shared_in_season_is_skipped():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (None, None, None)}, Config(),
+                          SeasonConsensus(episodes={fp: MatchInfo()}))
+    assert ep.confidence == "skip"
+    assert ep.flags[0] == "No intro/outro boundaries detected (skipped to avoid full-file conversion)"
+
+
+def test_resolve_episode_inverted_boundaries_are_skipped():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 20.0)}, Config(), _consensus(fp))
+    assert ep.confidence == "skip" and ep.flags[0].startswith("Invalid boundaries")
+
+
 def _touch(tmp_path, *names):
     paths = []
     for name in names:
@@ -131,17 +250,21 @@ def test_detect_empty_dir_returns_empty_plan(tmp_path):
 def test_detect_probes_fingerprints_and_resolves(tmp_path):
     files = _touch(tmp_path, "ep01.mp4", "ep02.mp4")
     fp_results = {files[0]: (0.0, 30.0, 2650.0)}
+    consensus = SeasonConsensus(
+        intro_len=30.0, outro_len=50.0, intro_episodes=1, outro_episodes=1,
+        episodes={files[0]: MatchInfo(2, 2, 30.0, 50.0)},
+    )
     with (
         patch("tvshow_noisemaker.pipeline.get_duration", return_value=2700.0),
         patch("tvshow_noisemaker.pipeline.detect_by_fingerprinting", return_value=fp_results) as mock_fp,
+        patch("tvshow_noisemaker.pipeline.get_last_consensus", return_value=consensus),
         patch("tvshow_noisemaker.pipeline.resolve_boundaries", return_value=(0.0, 30.0, 2650.0)),
     ):
         plan = detect(str(tmp_path), Config())
 
     assert [ep.basename for ep in plan.episodes] == ["ep01.mp4", "ep02.mp4"]
-    assert plan.episodes[0].source == "fingerprint"
-    assert plan.episodes[1].source == "silence"
-    assert all(ep.confidence == "high" for ep in plan.episodes)
+    assert plan.episodes[0].source == "fingerprint" and plan.episodes[0].confidence == "high"
+    assert plan.episodes[1].source == "silence" and plan.episodes[1].confidence == "review"
     assert all(ep.duration == 2700.0 for ep in plan.episodes)
     assert set(plan.stage_timings) == {"probe", "fingerprint", "boundaries"}
     mock_fp.assert_called_once()
