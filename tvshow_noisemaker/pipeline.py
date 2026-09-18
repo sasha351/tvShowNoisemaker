@@ -210,7 +210,8 @@ def _resolve_episode(
         has_timestamp_override = ts.get("intro_end") is not None or ts.get("outro_start") is not None
         has_user_duration_override = cfg.intro_duration is not None or cfg.outro_duration is not None
 
-        if fp in fingerprint_results and not has_timestamp_override:
+        # Explicit user choices (timestamps or fixed durations) win over fingerprints, as in v1.
+        if fp in fingerprint_results and not (has_timestamp_override or has_user_duration_override):
             _resolve_from_consensus(ep, fingerprint_results[fp], consensus.episodes.get(fp, MatchInfo()), consensus)
         else:
             ep.intro_start, ep.intro_end, ep.outro_start = resolve_boundaries(
