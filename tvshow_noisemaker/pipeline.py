@@ -264,17 +264,20 @@ def _resolve_from_consensus(
         ep.intro_start, ep.intro_end = None, None
         ep.confidence = "review"
         ep.flags.append(f"no intro match (season intro {consensus.intro_len:.0f} s)")
-    else:
+    elif consensus.intro_len is not None:
         ep.intro_start, ep.intro_end = intro_start, intro_end
         if info.intro_support < 2:
             ep.confidence = "review"
             ep.flags.append("intro matched 1 episode only")
         if (
-            info.intro_len is not None and consensus.intro_len is not None
+            info.intro_len is not None
             and abs(info.intro_len - consensus.intro_len) > _CONSENSUS_LEN_TOLERANCE
         ):
             ep.confidence = "review"
             ep.flags.append(f"intro length {info.intro_len:.0f} s vs season {consensus.intro_len:.0f} s")
+    else:
+        # No season consensus on this side (e.g. chroma STFT fallback): nothing to compare against.
+        ep.intro_start, ep.intro_end = intro_start, intro_end
 
     if outro_start is None and consensus.outro_len is None:
         ep.outro_start = ep.duration
@@ -283,17 +286,20 @@ def _resolve_from_consensus(
         ep.outro_start = None
         ep.confidence = "review"
         ep.flags.append(f"no credits match (season credits {consensus.outro_len:.0f} s)")
-    else:
+    elif consensus.outro_len is not None:
         ep.outro_start = outro_start
         if info.outro_support < 2:
             ep.confidence = "review"
             ep.flags.append("credits matched 1 episode only")
         if (
-            info.outro_len is not None and consensus.outro_len is not None
+            info.outro_len is not None
             and abs(info.outro_len - consensus.outro_len) > _CONSENSUS_LEN_TOLERANCE
         ):
             ep.confidence = "review"
             ep.flags.append(f"credits length {info.outro_len:.0f} s vs season {consensus.outro_len:.0f} s")
+    else:
+        # No season consensus on this side (e.g. chroma STFT fallback): nothing to compare against.
+        ep.outro_start = outro_start
 
     if info.intro_outliers:
         ep.flags.append(

@@ -215,6 +215,12 @@ def test_resolve_episode_fingerprint_match_beats_user_durations():
     assert (ep.intro_end, ep.source, ep.confidence) == (45.0, "fingerprint", "high")
 
 
+def test_resolve_episode_stft_boundary_with_no_consensus_is_high_and_unflagged():
+    fp = "/v/ep01.mkv"
+    ep = _resolve_episode(fp, 2700.0, {fp: (0.0, 30.0, 2600.0)}, Config(), SeasonConsensus())
+    assert (ep.source, ep.confidence, ep.flags) == ("fingerprint", "high", [])
+
+
 def test_resolve_episode_nothing_shared_in_season_is_skipped():
     fp = "/v/ep01.mkv"
     ep = _resolve_episode(fp, 2700.0, {fp: (None, None, None)}, Config(),

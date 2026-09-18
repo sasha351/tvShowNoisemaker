@@ -27,6 +27,7 @@ from tvshow_noisemaker.detector import (
     _popcount32,
     _frame_similarity,
     _refine_results_with_silence,
+    _set_last_consensus,
     _smooth,
     _snap_to_silence,
     _xcorr_boundary,
@@ -1015,6 +1016,17 @@ def test_detect_by_fingerprinting_forwards_cut_margin_on_stft_fallback():
         detect_by_fingerprinting(["/v/a.mkv", "/v/b.mkv"], durations={"/v/a.mkv": 1300.0, "/v/b.mkv": 1300.0},
                                  cut_margin=0.25)
     assert refine.call_args.kwargs["cut_margin"] == 0.25
+
+
+def test_detect_by_fingerprinting_stft_fallback_clears_stale_consensus():
+    """A season with no fpcalc (STFT fallback) must not leak a previous season's consensus."""
+    _set_last_consensus(SeasonConsensus(intro_len=30.0))
+    with patch("tvshow_noisemaker.detector._check_fpcalc", return_value=False), \
+         patch("tvshow_noisemaker.detector._compute_file_fingerprints",
+               side_effect=lambda fp, *a: (fp, np.zeros((12, 100)), np.zeros((12, 100)), 0, 0)), \
+         patch("tvshow_noisemaker.detector._refine_results_with_silence", return_value={}):
+        detect_by_fingerprinting(["/v/a.mkv", "/v/b.mkv"], durations={"/v/a.mkv": 1300.0, "/v/b.mkv": 1300.0})
+    assert get_last_consensus() == SeasonConsensus()
 
 
 # ---------------------------------------------------------------------------

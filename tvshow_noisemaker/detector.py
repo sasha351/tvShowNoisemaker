@@ -1353,6 +1353,9 @@ def detect_by_fingerprinting(
         in seconds.  Any boundary can be ``None`` when not confidently
         detected.  Files with insufficient audio are omitted.
     """
+    # A raised/absent Chromaprint pass must not leak the previous season's consensus.
+    _set_last_consensus(SeasonConsensus())
+
     # ── Chromaprint path (more accurate, inspired by intro-skipper) ──
     if _check_fpcalc():
         try:
