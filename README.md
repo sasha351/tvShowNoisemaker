@@ -126,6 +126,7 @@ This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight
 | `--input-dir`, `-i` | required | Input video directory |
 | `--output-dir`, `-o` | required | Output MP3 directory |
 | `--config`, `-c` | none | JSON config file |
+| `--format` | mp3 | Output audio format (`mp3`, `m4a`, `flac`, `wav`) |
 | `--workers`, `-w` | half CPU count | Parallel encode workers |
 | `--mp3-bitrate` | 256 | MP3 bitrate (kbps) |
 | `--fingerprint` / `--no-fingerprint` | on | Enable/disable fingerprinting |

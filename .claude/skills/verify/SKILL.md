@@ -28,7 +28,8 @@ Read detection quality from the log, not the console summary:
 
 Gotchas:
 - Chromaprint/silence results cache under `~/.cache/tvshow_noisemaker/`;
-  fingerprint stage is ~2s on cache hits. Silence-snap windows are uncached.
+  fingerprint stage is ~2s on cache hits. Silence-snap windows are cached
+  too (`raw-*.json` under the silence cache dir).
 - First-ever read of the mkvs can stall (iCloud materialization); a cold
   run may take minutes in probe/boundaries stages.
 - Full run ≈ 1–4 min; encoding 21 mp3s dominates.
