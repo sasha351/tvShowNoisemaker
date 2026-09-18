@@ -1,5 +1,7 @@
 import logging
 import queue
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -54,6 +56,17 @@ def test_review_row_round_trip_marks_manual_only_when_edited():
     assert edited.flags == ["credits matched 1 episode only"]
 
 
+def test_review_row_untouched_field_keeps_original_precision():
+    # format_time rounds to 0.1s, so an untouched 30.037 displays as "0:30.0"; that must
+    # not re-parse to 30.0 and get flagged as a manual edit that drops the fingerprint's precision.
+    row = ReviewRow.from_episode(_ep(intro_end=30.037, outro_start=1260.0, source="fingerprint"))
+    untouched = row.to_episode()
+    assert (untouched.intro_end, untouched.source, untouched.confidence) == (30.037, "fingerprint", "high")
+    row.intro_end = "0:31.0"
+    edited = row.to_episode()
+    assert (edited.intro_end, edited.source, edited.outro_start) == (31.0, "manual", 1260.0)
+
+
 def test_review_row_skip_and_blank_fields():
     row = ReviewRow.from_episode(_ep(confidence="review", intro_end=None))
     assert row.intro_end == ""
@@ -75,11 +88,55 @@ def test_snippet_player_runs_ffmpeg_then_afplay_and_stop_terminates():
     afplay = MagicMock()
     with patch("tvshow_noisemaker.review.subprocess.run") as run, \
          patch("tvshow_noisemaker.review.subprocess.Popen", return_value=afplay) as popen:
-        player._play_blocking("/v/ep01.mp4", 83.4)
+        player._play_blocking("/v/ep01.mp4", 83.4, player._gen)
     assert run.call_args[0][0][0] == "ffmpeg"
     assert popen.call_args[0][0][0] == "afplay"
     player.stop()
     afplay.terminate.assert_called_once()
+
+
+def test_snippet_player_stop_during_ffmpeg_phase_prevents_late_afplay():
+    # play()'s thread runs ffmpeg (subprocess.run) before spawning afplay; a stop() that
+    # lands in that window must stop the thread from starting afplay at all.
+    player = SnippetPlayer()
+    player._gen = 1  # as if play() had already bumped it for this in-flight thread
+
+    def run_then_stop(*args, **kwargs):
+        player.stop()  # simulates a stop() call arriving while ffmpeg is still running
+
+    with patch("tvshow_noisemaker.review.subprocess.run", side_effect=run_then_stop), \
+         patch("tvshow_noisemaker.review.subprocess.Popen") as popen:
+        player._play_blocking("/v/ep01.mp4", 83.4, 1)
+    popen.assert_not_called()
+
+
+def test_snippet_player_play_twice_only_second_generation_spawns():
+    player = SnippetPlayer()
+    first_ffmpeg_started = threading.Event()
+    release_first_ffmpeg = threading.Event()
+    run_calls = []
+
+    def fake_run(*args, **kwargs):
+        run_calls.append(args)
+        if len(run_calls) == 1:
+            first_ffmpeg_started.set()
+            release_first_ffmpeg.wait(timeout=2)
+
+    afplay = MagicMock()
+    with patch("tvshow_noisemaker.review.subprocess.run", side_effect=fake_run), \
+         patch("tvshow_noisemaker.review.subprocess.Popen", return_value=afplay) as popen:
+        player.play("/v/ep01.mp4", 1.0)
+        assert first_ffmpeg_started.wait(timeout=2)
+        player.play("/v/ep01.mp4", 2.0)  # stop()s the first (still in ffmpeg, no proc yet) and bumps the generation
+        release_first_ffmpeg.set()
+        for _ in range(100):  # wait for both threads' subprocess.run to return
+            if len(run_calls) >= 2:
+                break
+            time.sleep(0.02)
+        time.sleep(0.1)  # let both threads finish their post-run gen check / Popen call, if any
+
+    popen.assert_called_once()
+    assert player._proc is afplay
 
 
 def test_queue_handler_posts_formatted_lines():
@@ -92,3 +149,13 @@ def test_queue_handler_posts_formatted_lines():
     finally:
         logging.getLogger("tvshow_noisemaker.test_review").removeHandler(handler)
     assert q.get_nowait() == ("log", "WARNING hello world")
+
+
+def test_queue_handler_emit_swallows_format_errors():
+    q = queue.Queue()
+    handler = QueueHandler(q)
+    record = logging.LogRecord("tvshow_noisemaker.test_review", logging.WARNING, __file__, 1, "%d", ("x",), None)
+    with patch.object(handler, "handleError") as handle_error:
+        handler.emit(record)  # "%d" % ("x",) raises TypeError inside self.format()
+    handle_error.assert_called_once_with(record)
+    assert q.empty()

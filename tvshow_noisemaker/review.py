@@ -64,9 +64,15 @@ class ReviewRow:
         edited = False
         for name in ("intro_start", "intro_end", "outro_start"):
             text = getattr(self, name).strip()
-            value = parse_time(text) if text else None
-            if value != getattr(self.episode, name):
+            original = getattr(self.episode, name)
+            # A field is "edited" only if its text no longer matches the original's own
+            # display string — format_time's 0.1s rounding means an untouched value can
+            # re-parse a hair off the original float, which must not count as an edit.
+            if text == format_time(original):
+                value = original
+            else:
                 edited = True
+                value = parse_time(text) if text else None
             setattr(ep, name, value)
         ep.source = "manual" if edited else ep.source
         ep.confidence = "skip" if self.skip else "high"
@@ -84,19 +90,30 @@ class SnippetPlayer:
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
         self._dir = tempfile.mkdtemp(prefix="tvshow-snip-")
+        self._lock = threading.Lock()
+        self._gen = 0  # ponytail: generation counter, bumped by play()/stop(), guards the thread's late Popen
 
     def play(self, path: str, t: float) -> None:
         self.stop()
-        threading.Thread(target=self._play_blocking, args=(path, t), daemon=True).start()
+        with self._lock:
+            self._gen += 1
+            gen = self._gen
+        threading.Thread(target=self._play_blocking, args=(path, t, gen), daemon=True).start()
 
-    def _play_blocking(self, path: str, t: float) -> None:
+    def _play_blocking(self, path: str, t: float, gen: int) -> None:
         wav = os.path.join(self._dir, "snippet.wav")
         subprocess.run(snippet_cmd(path, t, wav), capture_output=True, timeout=60)
-        self._proc = subprocess.Popen(["afplay", wav])  # ponytail: macOS only, like the folder picker
-        self._proc.wait()
+        with self._lock:
+            if gen != self._gen:
+                return  # stop() (or a newer play()) landed while ffmpeg was running
+            self._proc = subprocess.Popen(["afplay", wav])  # ponytail: macOS only, like the folder picker
+            proc = self._proc
+        proc.wait()
 
     def stop(self) -> None:
-        proc, self._proc = self._proc, None
+        with self._lock:
+            self._gen += 1
+            proc, self._proc = self._proc, None
         if proc is not None:
             try:
                 proc.terminate()
@@ -112,4 +129,7 @@ class QueueHandler(logging.Handler):
         self._q = q
 
     def emit(self, record: logging.LogRecord) -> None:
-        self._q.put(("log", self.format(record)))
+        try:
+            self._q.put(("log", self.format(record)))
+        except Exception:  # pylint: disable=broad-except
+            self.handleError(record)
