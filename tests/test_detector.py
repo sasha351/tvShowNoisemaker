@@ -27,6 +27,7 @@ from tvshow_noisemaker.detector import (
     _popcount32,
     _frame_similarity,
     _refine_results_with_silence,
+    _run_silencedetect,
     _set_last_consensus,
     _smooth,
     _snap_to_silence,
@@ -38,6 +39,11 @@ from tvshow_noisemaker.detector import (
     resolve_boundaries,
 )
 from tvshow_noisemaker.config import Config
+
+
+@pytest.fixture(autouse=True)
+def _isolated_silence_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("tvshow_noisemaker.detector._SILENCE_CACHE_DIR", tmp_path / "silence-cache")
 
 
 # ---------------------------------------------------------------------------
@@ -1186,3 +1192,29 @@ def test_chromaprint_consensus_publishes_reference_episodes():
     cons = get_last_consensus()
     assert len(cons.intro_refs) == 2 and set(cons.intro_refs) <= set(paths)
     assert len(cons.outro_refs) == 2 and set(cons.outro_refs) <= set(paths)
+
+
+def _fake_raw_silencedetect_run(stderr: str):
+    return MagicMock(returncode=0, stdout="", stderr=stderr)
+
+
+def test_run_silencedetect_caches_per_window(tmp_path):
+    media = tmp_path / "ep.mp4"
+    media.write_bytes(b"x")
+    stderr = "[silencedetect] silence_start: 1.5\n[silencedetect] silence_end: 2.0 | silence_duration: 0.5\n"
+    with patch("tvshow_noisemaker.detector.subprocess.run", return_value=_fake_raw_silencedetect_run(stderr)) as run:
+        first = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
+        second = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
+        other = _run_silencedetect(str(media), -50.0, 0.33, seek=20.0, limit=7.0)
+    assert first == second == ([11.5], [12.0])
+    assert other == ([21.5], [22.0])
+    assert run.call_count == 2  # same window served from cache; a different seek is a new run
+
+
+def test_run_silencedetect_does_not_cache_failures(tmp_path):
+    media = tmp_path / "ep.mp4"
+    media.write_bytes(b"x")
+    with patch("tvshow_noisemaker.detector.subprocess.run", side_effect=OSError("no ffmpeg")) as run:
+        assert _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0) is None
+        assert _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0) is None
+    assert run.call_count == 2

@@ -1649,6 +1649,23 @@ def _save_cached_silence(
         return
 
 
+def _silencedetect_cache_path(
+    filepath: str, silence_db: float, min_silence_len: float, seek: float, limit: Optional[float],
+) -> Optional[Path]:
+    """Cache path for one raw ``silencedetect`` window; ``None`` when *filepath* cannot be stat'd."""
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return None
+    key = "|".join((
+        filepath, f"{silence_db:.1f}", f"{min_silence_len:.3f}", f"{seek:.3f}",
+        "full" if limit is None else f"{limit:.3f}",
+        str(st.st_size), str(st.st_mtime_ns), _CACHE_VERSION,
+    ))
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return _SILENCE_CACHE_DIR / f"raw-{digest}.json"
+
+
 def _run_silencedetect(
     filepath: str,
     silence_db: float,
@@ -1663,6 +1680,14 @@ def _run_silencedetect(
     transient failure).  With input seeking (``-ss`` before ``-i``) ffmpeg
     reports timestamps relative to the seek point, so *seek* is added back.
     """
+    cache_path = _silencedetect_cache_path(filepath, silence_db, min_silence_len, seek, limit)
+    if cache_path is not None and cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return list(data["starts"]), list(data["ends"])
+        except Exception:  # pylint: disable=broad-except
+            pass  # unreadable cache entry: fall through and rerun
+
     cmd = ["ffmpeg"]
     if seek > 0:
         cmd += ["-ss", str(seek)]
@@ -1695,6 +1720,12 @@ def _run_silencedetect(
                 ends.append(seek + float(line.split("silence_end:")[1].split("|")[0].strip()))
             except (IndexError, ValueError):
                 pass
+    if cache_path is not None:
+        try:  # ponytail: best-effort cache write, same as _save_cached_silence
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps({"starts": starts, "ends": ends}), encoding="utf-8")
+        except Exception:  # pylint: disable=broad-except
+            pass
     return starts, ends
 
 
