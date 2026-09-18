@@ -1264,7 +1264,8 @@ def _refine_results_with_silence(
     each boundary is first cross-correlated against the first usable
     reference (:func:`_xcorr_boundary`) and, if that succeeds, snapped to
     silence within a tight 1 s safe-side-only window; otherwise it falls back
-    to the old ±5/2 s snap.  Runs one file per thread since each ffmpeg call
+    to a wide silence snap whose window follows the safe side (5 s on the
+    safe side, 2 s on the unsafe side).  Runs one file per thread since each ffmpeg call
     only scans a short window.  Falls back to the original (unrefined) tuple
     for a file when snapping would break intro_start < intro_end < outro_start
     ordering.  Then *cut_margin* seconds are given back on every cut
@@ -1282,7 +1283,8 @@ def _refine_results_with_silence(
 
         Without a usable reference (none configured, or only this episode itself /
         references with no boundary) or when the reference has no shared audio
-        there, fall back to the wide Chromaprint-era snap.
+        there, fall back to a wide silence snap whose window follows the safe
+        side (5 s on the safe side, 2 s on the unsafe side).
         """
         if t is None:
             return None

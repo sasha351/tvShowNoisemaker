@@ -896,6 +896,12 @@ def test_snap_falls_back_to_nearest_on_unsafe_side():
     # Same candidate but its silence runs later (99.8 >= 99.67) → contiguous, so it is used.
     with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([96.0, 99.0], [96.5, 99.8])):
         assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 99.0
+    # safe="before" rejection: only unsafe-side (later) candidate, gap 1.5s > 0.33s → not contiguous, keep t.
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([101.5], [102.0])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before") == 100.0
+    # Missing end padded to inf: earlier-side candidate with no end still counts as contiguous.
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([99.0], [])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 99.0
 
 
 def test_snap_default_window_follows_the_safe_side():
@@ -1156,7 +1162,7 @@ def test_refine_falls_back_to_wide_snap_when_xcorr_fails():
     results = {"/v/a.mkv": (0.0, 80.0, 1200.0), "/v/r.mkv": (0.0, 78.0, 1190.0)}
     durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
     with patch("tvshow_noisemaker.detector._xcorr_boundary", return_value=None), \
-         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda fp, t, d, safe="before", before=5.0, after=2.0: t - 0.2 if (before, after) == (5.0, 2.0) else -1.0):
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda fp, t, d, safe="before", **kw: t - 0.2):
         out = _refine_results_with_silence(results, durations, cut_margin=0.0, references={"intro": ["/v/r.mkv"], "outro": ["/v/r.mkv"]})
     assert out["/v/a.mkv"] == (0.0, 79.8, 1199.8)
 

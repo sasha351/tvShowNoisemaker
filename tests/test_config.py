@@ -166,6 +166,22 @@ def test_build_config_cli_overrides_file():
     assert cfg.log_file == "out.log"
 
 
+def test_build_config_negative_cut_margin_raises():
+    args = _FakeArgs(
+        intro_duration=None,
+        outro_duration=None,
+        mp3_bitrate=None,
+        silence_db=None,
+        min_silence_len=None,
+        fingerprint_search_window=None,
+        cut_margin=-1,
+        fingerprint=True,
+        log_file=None,
+    )
+    with pytest.raises(ValueError, match="cut_margin"):
+        build_config(args, {})
+
+
 def test_build_config_file_fills_missing():
     args = _FakeArgs(
         intro_duration=None,
