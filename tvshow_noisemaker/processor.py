@@ -47,7 +47,7 @@ def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
     _, codec_args, uses_bitrate = _FORMATS[output_format]
     args = list(codec_args)
     if output_format == "m4a":
-        args[1] = _aac_encoder()
+        args = ["-acodec", _aac_encoder()]
     if uses_bitrate:
         args.extend(["-ab", f"{mp3_bitrate}k"])
     return args

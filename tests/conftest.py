@@ -12,3 +12,8 @@ def _reset_aac_probe():
     _aac_encoder.cache_clear()
     yield
     _aac_encoder.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_silence_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("tvshow_noisemaker.detector._SILENCE_CACHE_DIR", tmp_path / "silence-cache")

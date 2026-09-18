@@ -8,6 +8,8 @@ PY="$ROOT/.venv/bin/python"
 OUT="$(mktemp -d /tmp/bench_perf.XXXXXX)"
 CACHE="$HOME/.cache/tvshow_noisemaker"
 
+[[ -d "$SEASON" ]] || { echo "no such dir: $SEASON"; exit 1; }
+
 if [[ "$(ls -lO "$SEASON" | grep -c dataless)" != "0" ]]; then
   echo "refusing: $SEASON has iCloud-evicted files (download them first)"; exit 1
 fi

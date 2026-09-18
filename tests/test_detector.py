@@ -41,11 +41,6 @@ from tvshow_noisemaker.detector import (
 from tvshow_noisemaker.config import Config
 
 
-@pytest.fixture(autouse=True)
-def _isolated_silence_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr("tvshow_noisemaker.detector._SILENCE_CACHE_DIR", tmp_path / "silence-cache")
-
-
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -1205,10 +1200,29 @@ def test_run_silencedetect_caches_per_window(tmp_path):
     with patch("tvshow_noisemaker.detector.subprocess.run", return_value=_fake_raw_silencedetect_run(stderr)) as run:
         first = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
         second = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
-        other = _run_silencedetect(str(media), -50.0, 0.33, seek=20.0, limit=7.0)
+        other_seek = _run_silencedetect(str(media), -50.0, 0.33, seek=20.0, limit=7.0)
+        assert run.call_count == 2  # same window served from cache; a different seek is a new run
+
+        other_limit = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=8.0)
+        assert run.call_count == 3  # different limit is a new run
+        other_limit_repeat = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=8.0)
+        assert run.call_count == 3  # repeat served from cache
+
+        other_db = _run_silencedetect(str(media), -45.0, 0.33, seek=10.0, limit=7.0)
+        assert run.call_count == 4  # different silence_db is a new run
+        other_db_repeat = _run_silencedetect(str(media), -45.0, 0.33, seek=10.0, limit=7.0)
+        assert run.call_count == 4  # repeat served from cache
+
+        other_len = _run_silencedetect(str(media), -50.0, 0.5, seek=10.0, limit=7.0)
+        assert run.call_count == 5  # different min_silence_len is a new run
+        other_len_repeat = _run_silencedetect(str(media), -50.0, 0.5, seek=10.0, limit=7.0)
+        assert run.call_count == 5  # repeat served from cache
+
     assert first == second == ([11.5], [12.0])
-    assert other == ([21.5], [22.0])
-    assert run.call_count == 2  # same window served from cache; a different seek is a new run
+    assert other_seek == ([21.5], [22.0])
+    assert other_limit == other_limit_repeat == ([11.5], [12.0])
+    assert other_db == other_db_repeat == ([11.5], [12.0])
+    assert other_len == other_len_repeat == ([11.5], [12.0])
 
 
 def test_run_silencedetect_does_not_cache_failures(tmp_path):
