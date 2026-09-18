@@ -33,6 +33,18 @@ Gotchas:
   run may take minutes in probe/boundaries stages.
 - Full run ≈ 1–4 min; encoding 21 mp3s dominates.
 
+## Performance
+
+```bash
+tools/bench_perf.sh test_media/FamilyGuy02 [mp3|m4a]
+```
+
+Prints a `cold-detect` / `warm-detect` / `warm-encode-<format>` timing matrix.
+Cold = `~/.cache/tvshow_noisemaker` wiped first (chromaprint/silence caches
+refill on the run); warm = cache hits from a prior run. Detection numbers must
+still match `tools/bench_detection.py` — a performance change must never move
+them.
+
 ## Detection benchmark
 
 ```bash

@@ -182,6 +182,7 @@ The run summary includes:
 - One MP3 per input file in `--output-dir`.
 - Auto metadata from folder/filename patterns.
 - Log file saved to output directory by default.
+- `--format m4a` uses Apple's AudioToolbox encoder (`aac_at`) when available, which is much faster than ffmpeg's software AAC.
 
 ## Development
 
