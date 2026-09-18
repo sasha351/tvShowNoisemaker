@@ -889,8 +889,23 @@ def test_snap_prefers_safe_side_after_for_starts():
 def test_snap_falls_back_to_nearest_on_unsafe_side():
     with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([100.3, 101.5], [100.8, 102.0])):
         assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before") == 100.3   # first after t, not 101.5
+    # The unsafe-side candidate must be contiguous with t (nothing spoken in between): its silence
+    # ends too early (99.4 < 100 - 0.33), so dialogue sits between it and t → no fallback, keep t.
     with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([96.0, 99.0], [96.5, 99.4])):
+        assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 100.0
+    # Same candidate but its silence runs later (99.8 >= 99.67) → contiguous, so it is used.
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([96.0, 99.0], [96.5, 99.8])):
         assert _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after") == 99.0
+
+
+def test_snap_default_window_follows_the_safe_side():
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([], [])) as sil:
+        _snap_to_silence("f.mkv", 100.0, 1200.0, safe="after")
+    assert sil.call_args.kwargs == {"seek": 98.0, "limit": 7.0}
+
+    with patch("tvshow_noisemaker.detector._run_silencedetect", return_value=([], [])) as sil:
+        _snap_to_silence("f.mkv", 100.0, 1200.0, safe="before")
+    assert sil.call_args.kwargs == {"seek": 95.0, "limit": 7.0}
 
 
 def test_snap_to_silence_returns_t_when_silencedetect_fails():

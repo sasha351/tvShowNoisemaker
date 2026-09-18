@@ -1196,19 +1196,27 @@ def _xcorr_boundary(ep_path: str, t_ep: float, ref_path: str, t_ref: float, shar
 
 def _snap_to_silence(
     filepath: str, t: float, duration: float, safe: str = "before",
-    before: float = _REFINE_WINDOW_BEFORE, after: float = _REFINE_WINDOW_AFTER,
+    before: Optional[float] = None, after: Optional[float] = None,
 ) -> float:
     """Snap boundary *t* to the start of a nearby silence, preferring the safe side.
 
     Searches [t − before, t + after] like intro-skipper.  *safe* names the
     side where moving the cut can only keep more content: ``"before"`` for
     intro_end (earlier keeps a little theme), ``"after"`` for intro_start and
-    outro_start (later keeps a little cold open or episode).  Silences on the
-    safe side win, closest first; the unsafe side is used only when the safe
-    side has none, and then only the silence nearest *t* — never one past
+    outro_start (later keeps a little cold open or episode).  When *before*/
+    *after* are not given they follow *safe*, so the window is biased toward
+    the side that is actually searched for a preferred candidate.  Silences on
+    the safe side win, closest first; the unsafe side is used only when the
+    safe side has none, and then only a silence contiguous with *t* — one
+    whose gap to *t* is within a silence's own minimum length, never one past
     spoken words.  Returns *t* unchanged when no silence is found or *t* is at
     the file edges.
     """
+    if before is None:
+        before = _REFINE_WINDOW_BEFORE if safe == "before" else _REFINE_WINDOW_AFTER
+    if after is None:
+        after = _REFINE_WINDOW_AFTER if safe == "before" else _REFINE_WINDOW_BEFORE
+
     if t <= before or t >= duration - after:
         return t
 
@@ -1221,13 +1229,23 @@ def _snap_to_silence(
     )
     if result is None:
         return t
-    starts, _ends = result
-    before = [s for s in starts if s <= t]
-    after = [s for s in starts if s > t]
-    preferred, fallback = (before, after) if safe == "before" else (after, before)
-    for candidates in (preferred, fallback):
-        if candidates:
-            return min(candidates, key=lambda start: abs(start - t))
+    starts, ends = result
+    if len(ends) < len(starts):
+        ends = ends + [float("inf")] * (len(starts) - len(ends))
+    pairs = list(zip(starts, ends))
+    earlier = [(s, e) for s, e in pairs if s <= t]
+    later = [(s, e) for s, e in pairs if s > t]
+    preferred, fallback = (earlier, later) if safe == "before" else (later, earlier)
+    if preferred:
+        return min(preferred, key=lambda p: abs(p[0] - t))[0]
+
+    # Unsafe-side fallback: only a silence contiguous with t (nothing spoken in between).
+    if safe == "before":
+        candidates = [s for s, e in fallback if s - t <= _REFINE_MIN_SILENCE]
+    else:
+        candidates = [s for s, e in fallback if e >= t - _REFINE_MIN_SILENCE]
+    if candidates:
+        return min(candidates, key=lambda start: abs(start - t))
     return t
 
 
