@@ -1,31 +1,12 @@
+import pytest
+
 from tvshow_noisemaker.gui import (
-    parse_total,
-    is_file_result,
     output_subdir_for,
     basename_collisions,
     parse_chosen_folders,
     format_folder_progress,
-    friendly_result_line,
 )
-
-
-def test_parse_total_matches_conversion_line():
-    line = "2026-07-07 10:00:00 [INFO] tvshow_noisemaker.console: Starting conversion  (12 files, 11 to encode, 4 workers, output → /tmp/out)"
-    assert parse_total(line) == 12
-
-
-def test_parse_total_ignores_other_lines():
-    assert parse_total("Processing episode01.mkv") is None
-    assert parse_total("") is None
-
-
-def test_is_file_result_done_skipped_failed():
-    assert is_file_result("  ✓ Done in 3.2s → /tmp/out/ep01.mp3 (4.1 MB)")
-    assert is_file_result("  ✗ Skipped – no boundaries resolved")
-    assert is_file_result("  ✗ Failed – ep02.mkv: ffmpeg exited 1")
-    assert not is_file_result("Processing episode01.mkv")
-    # Summary-section listings use '•', not '✗' — they must not double-count.
-    assert not is_file_result("  • ep03.mkv – no boundaries resolved")
+from tvshow_noisemaker.pipeline import EpisodePlan, Plan
 
 
 def test_output_subdir_for_joins_basename():
@@ -67,11 +48,41 @@ def test_format_folder_progress_with_total():
     )
 
 
-def test_friendly_result_line_condenses_done_to_filename():
-    line = "  ✓ Done in 3.2s → /tmp/out/ep01.mp3 (4.1 MB)"
-    assert friendly_result_line(line) == "✓ ep01.mp3"
+def test_format_folder_progress_detecting_with_counts():
+    assert format_folder_progress(1, 2, "Show", 3, 21, stage="fingerprint") == "Folder 1/2 (Show): Detecting 3/21…"
 
 
-def test_friendly_result_line_passes_through_skipped_and_failed():
-    assert friendly_result_line("  ✗ Skipped – no boundaries resolved") == "✗ Skipped – no boundaries resolved"
-    assert friendly_result_line("  ✗ Failed – ep02.mkv: ffmpeg exited 1") == "✗ Failed – ep02.mkv: ffmpeg exited 1"
+def _headless_app():
+    ctk = pytest.importorskip("customtkinter")
+    from tvshow_noisemaker.gui import App
+    try:
+        root = ctk.CTk()
+    except Exception as exc:  # no display
+        pytest.skip(f"no display: {exc}")
+    root.withdraw()
+    return root, App(root)
+
+
+def test_app_routes_review_episodes_to_the_panel_and_approval_to_the_encode_queue(tmp_path):
+    root, app = _headless_app()
+    try:
+        app.src_folders = [str(tmp_path)]
+        app.dst.set(str(tmp_path / "out"))
+        app._begin_batch(start_threads=False)
+        plan = Plan(input_dir=str(tmp_path), episodes=[
+            EpisodePlan(path=str(tmp_path / "a.mp4"), duration=1300.0, intro_start=0.0, intro_end=30.0, outro_start=1260.0),
+            EpisodePlan(path=str(tmp_path / "b.mp4"), duration=1300.0, intro_start=0.0, intro_end=None, outro_start=1260.0,
+                        confidence="review", flags=["no intro match (season intro 30 s)"]),
+        ])
+        app._handle(("plan", str(tmp_path), plan))
+        first_job = app.encode_jobs.get_nowait()
+        assert [ep.basename for ep in first_job[1].episodes] == ["a.mp4"]
+        assert len(app.review_rows) == 1
+        app.review_rows[0].entries["intro_end"].insert(0, "0:31.0")
+        app._approve(app.review_rows[0])
+        approved_job = app.encode_jobs.get_nowait()
+        ep = approved_job[1].episodes[0]
+        assert (ep.basename, ep.intro_end, ep.source, ep.confidence) == ("b.mp4", 31.0, "manual", "high")
+        assert app.review_rows == []
+    finally:
+        root.destroy()
