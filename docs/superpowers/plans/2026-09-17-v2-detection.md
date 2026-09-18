@@ -1132,3 +1132,62 @@ $GIT commit -m "docs: Phase 2 benchmark results; README + verify skill for conse
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+## Results (Phase 2 gate, 2026-09-17)
+
+```
+== FamilyGuy02: 21 episodes, detect 1.5s, stages {'probe': 0.12588037500245264, 'fingerprint': 1.388140666000254, 'boundaries': 0.0008830410006339662}
+
+== Friends03: 25 episodes, detect 1.8s, stages {'probe': 0.1555514170031529, 'fingerprint': 1.6779638750012964, 'boundaries': 0.0007674160005990416}
+
+== TopGear05: 7 episodes, detect 0.2s, stages {'probe': 0.06818691700027557, 'fingerprint': 0.13525441700039664, 'boundaries': 0.0004558750006253831}
+
+FamilyGuy02/Family Guy - S02E01 - Peter, Peter, Caviar Eater review     +0.00    -1.93   +18.98  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (37 s, 39 s, 37 s, 36 s, 37 s, 37 s, 38 s, 32 s, 37 s, 37 s, 37 s, 37 s, 37 s, 38 s, 37 s, 37 s, 37 s)
+FamilyGuy02/Family Guy - S02E02 - Holy Crap.mkv              review     +0.00    -2.68   +17.63  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (37 s, 37 s, 37 s, 36 s, 37 s, 37 s, 37 s, 31 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s)
+FamilyGuy02/Family Guy - S02E03 - Da Boom.mkv                review     +0.00    -2.59   +19.12  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (38 s, 36 s, 37 s, 37 s, 39 s, 38 s, 37 s, 32 s, 37 s, 38 s, 36 s, 36 s, 37 s, 37 s, 37 s, 37 s, 37 s)
+FamilyGuy02/Family Guy - S02E04 - Brian in Love.mkv          review     -0.07    -1.95   +18.97  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (38 s, 37 s, 38 s, 37 s, 39 s, 38 s, 39 s, 32 s, 37 s, 38 s, 37 s, 37 s, 37 s, 37 s, 38 s, 40 s, 37 s)
+FamilyGuy02/Family Guy - S02E05 - Love Thy Trophy.mkv        review     -0.04    -2.05        -  no credits match (season credits 20 s)
+FamilyGuy02/Family Guy - S02E06 - Death is a Bitch.mkv       review     +0.00    -2.07   +17.40  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 37 s, 37 s, 37 s, 36 s, 37 s, 31 s, 38 s, 38 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s, 36 s)
+FamilyGuy02/Family Guy - S02E07 - The King is Dead.mkv       review     +0.00    -0.68   +18.93  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (37 s, 37 s, 39 s, 39 s, 37 s, 38 s, 38 s, 32 s, 37 s, 39 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s, 37 s)
+FamilyGuy02/Family Guy - S02E08 - I Am Peter, Hear Me Roar.m review     +0.00    -2.10   +17.85  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (37 s, 36 s, 38 s, 37 s, 36 s, 37 s, 37 s, 32 s, 37 s, 38 s, 36 s, 37 s, 37 s, 37 s, 37 s, 37 s, 40 s)
+FamilyGuy02/Family Guy - S02E09 - If I'm Dyin' I'm Lyin'.mkv review     +0.00    -0.64   +18.97  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 37 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s, 36 s, 36 s, 36 s, 36 s, 37 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E11 - A Picture's Worth a Thousa review     -0.12    -2.62   +18.28  credits matched 1 episode only; credits length 17 s vs season 20 s; ignored 17 other shared segment(s) near the end (32 s, 31 s, 32 s, 32 s, 32 s, 32 s, 32 s, 32 s, 32 s, 32 s, 31 s, 32 s, 32 s, 32 s, 32 s, 33 s, 32 s)
+FamilyGuy02/Family Guy - S02E12 - Fifteen Minutes of Shame.m review     -0.17    -2.90   +18.79  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 37 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E13 - Road to Rhode Island (Unce review         -        -   +19.35  no intro match (season intro 30 s); credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 38 s, 37 s, 37 s, 38 s, 38 s, 37 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E14 - Let's Go to the Hop.mkv    review     +0.00    -2.34   +18.31  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 35 s, 36 s, 36 s, 36 s, 35 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E15 - Dammit Janet.mkv           review     +0.00    -1.94   +19.88  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 35 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E16 - There's Something About Pa review     +0.00    -2.73   +18.21  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E17 - He's Too Sexy for His Fat. review     -0.10    -2.21   +18.25  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 35 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s)
+FamilyGuy02/Family Guy - S02E18 - E. Peterbus Unum.mkv       review     +0.00    -2.14   +18.99  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s)
+FamilyGuy02/Family Guy - S02E19 - The Story on Page One.mkv  review     +0.15    -2.44   +19.39  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 39 s, 36 s, 36 s, 37 s, 37 s, 38 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s, 37 s)
+FamilyGuy02/Family Guy - S02E20 - Wasted Talent.mkv          review     +0.00    -2.93        -  no credits match (season credits 20 s)
+FamilyGuy02/Family Guy - S02E21 - Fore, Father.mkv           review     -0.15    -0.63   +19.35  credits matched 1 episode only; ignored 17 other shared segment(s) near the end (36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 40 s, 37 s, 36 s, 36 s, 36 s, 36 s, 36 s, 36 s, 37 s, 36 s, 37 s)
+Friends03/Friends.S03E04.The.One.with.the.Metaphorical.Tunne high       -2.41    -0.12        -  CLIPPED intro_start; no shared credits found in this season
+Friends03/Friends.S03E12.The.One.with.All.the.Jealousy.720p. high       -0.92    -0.07        -  CLIPPED intro_start; no shared credits found in this season
+Friends03/Friends.S03E16.The.One.the.Morning.After.720p.BluR high       -0.54    -2.18        -  CLIPPED intro_start; no shared credits found in this season
+Friends03/Friends.S03E21.The.One.with.the.Chick.and.the.Duck high       -0.80    +0.32        -  CLIPPED intro_start,intro_end; ignored 1 other shared segment(s) near the start (50 s); no shared credits found in this season
+Friends03/Friends.S03E22.The.One.with.the.Screamer.720p.BluR high       -0.93    -0.18        -  CLIPPED intro_start; no shared credits found in this season
+TopGear05/Top Gear - [05x01] - 2004.10.24 [VFUA].avi         review         -        -        -  no shared intro found in this season; no credits match (season credits 26 s)
+TopGear05/Top Gear - [05x02] - 2004.10.31 [VFUA].avi         review         -        -        -  UNDETECTED outro_start; no shared intro found in this season; no credits match (season credits 26 s)
+TopGear05/Top Gear - [05x05] - 2004.11.21 [VFUA].avi         review         -        -        -  no shared intro found in this season; no credits match (season credits 26 s)
+TopGear05/Top Gear - [05x07] - 2004.12.12 [PiXTV].avi        review         -        -        -  no shared intro found in this season; no credits match (season credits 26 s)
+
+episodes compared: 53
+clipped dialogue: 5
+undetected boundaries: 1
+no-intro episodes cut anyway: 0
+review episodes: 24
+max |intro_start| error: 2.41s   mean: 0.67s   n=45
+max |intro_end| error: 2.93s   mean: 1.07s   n=45
+max |outro_start| error: 19.88s   mean: 16.03s   n=22
+episodes without ground truth: 0
+```
+
+Acceptance vs. the spec:
+
+- `clipped dialogue: 0` — **fails**, actual `5`. All five are `high`-confidence Friends03 episodes whose fingerprinted `intro_start` landed before the cold-open boundary in ground truth: S03E04 (−2.41s), S03E12 (−0.92s), S03E16 (−0.54s), S03E21 (−0.80s, also clipped `intro_end` +0.32s), S03E22 (−0.93s). Not tuned; reported as found.
+- `no-intro episodes cut anyway: 0` — passes, actual `0`.
+- Every `TopGear05` episode and `FamilyGuy02` S02E13 has `intro_end` treated as "no intro" (no `NO-INTRO CUT`) — passes; no row in the run carries a `NO-INTRO CUT` note, and all TopGear05 rows plus S02E13 show `intro_start`/`intro_end` as `-` (untouched) with the flag `no shared intro found in this season` (S02E13: `no intro match (season intro 30 s)`, since FamilyGuy02 *has* a season intro and E13 is the one episode that doesn't match it — still not cut).
+- `FamilyGuy02` S02E05 and S02E20 are `review` with `no credits match` — passes; both rows show `review` and the flag `no credits match (season credits 20 s)`.
+- `Friends03` episodes are `high` with the flag `no shared credits found in this season` — passes; all 25 rows are `high` and carry that flag.
+- `max |intro_end| error` on `high` episodes ≤ 1.0s — **fails**. Filtering the per-row `high`-confidence episodes only (the printed summary line mixes in `review` rows), the max is **2.31s** on `FamilyGuy02/Family Guy - S02E10 - Running Mates.mkv` (i_end −2.31, the only `high` FamilyGuy02 episode); next highest is `Friends03/S03E16` at 2.18s. Both exceed the 1.0s spec target. Not tuned; reported as found — controller decides whether Phase 2.5 cross-correlation refinement is needed.

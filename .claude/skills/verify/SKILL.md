@@ -6,11 +6,11 @@ description: How to run tvshow-noisemaker end-to-end against the bundled test me
 # Verify tvshow-noisemaker
 
 Surface is the CLI (the GUI shells out to it). Run against the 21 real
-Family Guy episodes in `test_media/Season 02/`:
+Family Guy episodes in `test_media/FamilyGuy02/`:
 
 ```bash
 .venv/bin/python -m tvshow_noisemaker.cli \
-  -i "test_media/Season 02" -o <scratch>/out \
+  -i "test_media/FamilyGuy02" -o <scratch>/out \
   --log-file <scratch>/run.log --verbose
 ```
 
@@ -37,7 +37,7 @@ Gotchas:
 
 ```bash
 .venv/bin/python tools/bench_detection.py            # all seasons under test_media/
-.venv/bin/python tools/bench_detection.py --season "Season 02"
+.venv/bin/python tools/bench_detection.py --season "FamilyGuy02"
 ```
 
 Compares `pipeline.detect` to `tools/ground_truth.json` (seconds; `null` =
@@ -46,3 +46,9 @@ and "no-intro episodes cut anyway" must be 0 before a detection change ships.
 Bootstrap new truth entries with
 `tvshow-noisemaker -i <season> -o /tmp/x --detect-only plan.json`, then
 verify each cut by ear and copy the corrected numbers in.
+
+Expected per show (bootstrapped truth, 2026-09-17): FamilyGuy02 — E13 review
+("no intro match"), E05/E20 review ("no credits match"), everything else high;
+Friends03 — all high, flag "no shared credits found in this season" (credits are
+6–12 s, below the 15 s match floor); TopGear05 — no intro in the season
+(intro_end 0.0), 3 episodes with credits high, 4 review ("no credits match").
