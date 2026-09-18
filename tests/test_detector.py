@@ -1007,7 +1007,8 @@ def test_refine_keeps_original_when_margin_breaks_ordering():
 
 def test_detect_by_fingerprinting_forwards_cut_margin_on_stft_fallback():
     with patch("tvshow_noisemaker.detector._check_fpcalc", return_value=False), \
-         patch("tvshow_noisemaker.detector._extract_audio_pcm", return_value=None), \
+         patch("tvshow_noisemaker.detector._compute_file_fingerprints",
+               side_effect=lambda fp, *a: (fp, np.zeros((12, 100)), np.zeros((12, 100)), 0, 0)), \
          patch("tvshow_noisemaker.detector._refine_results_with_silence", return_value={}) as refine:
         detect_by_fingerprinting(["/v/a.mkv", "/v/b.mkv"], durations={"/v/a.mkv": 1300.0, "/v/b.mkv": 1300.0},
                                  cut_margin=0.25)
