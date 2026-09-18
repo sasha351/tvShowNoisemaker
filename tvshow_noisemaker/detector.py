@@ -1720,7 +1720,7 @@ def _run_silencedetect(
                 ends.append(seek + float(line.split("silence_end:")[1].split("|")[0].strip()))
             except (IndexError, ValueError):
                 pass
-    if cache_path is not None:
+    if cache_path is not None and result.returncode == 0:
         try:  # ponytail: best-effort cache write, same as _save_cached_silence
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps({"starts": starts, "ends": ends}), encoding="utf-8")

@@ -1218,3 +1218,15 @@ def test_run_silencedetect_does_not_cache_failures(tmp_path):
         assert _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0) is None
         assert _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0) is None
     assert run.call_count == 2
+
+
+def test_run_silencedetect_does_not_cache_nonzero_exit(tmp_path):
+    media = tmp_path / "ep.mp4"
+    media.write_bytes(b"")
+    bad_run = MagicMock(returncode=1, stdout="", stderr="")
+    with patch("tvshow_noisemaker.detector.subprocess.run", return_value=bad_run) as run:
+        first = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
+        second = _run_silencedetect(str(media), -50.0, 0.33, seek=10.0, limit=7.0)
+    assert first == second == ([], [])
+    assert run.call_count == 2  # non-zero exit must never be served from cache
+    assert not list(tmp_path.glob("**/raw-*.json"))
