@@ -74,6 +74,13 @@ def test_load_config_invalid_bitrate(tmp_path):
         load_config(str(cfg_file))
 
 
+def test_load_config_invalid_cut_margin(tmp_path):
+    cfg_file = tmp_path / "cfg.json"
+    cfg_file.write_text(json.dumps({"cut_margin": -0.1}), encoding="utf-8")
+    with pytest.raises(ValueError, match="cut_margin"):
+        load_config(str(cfg_file))
+
+
 def test_load_config_valid_output_format(tmp_path):
     cfg_file = tmp_path / "cfg.json"
     cfg_file.write_text(json.dumps({"output_format": "flac"}), encoding="utf-8")

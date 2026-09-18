@@ -1155,6 +1155,10 @@ episodes without ground truth: 0
 
 ### After Phase 2.5 (cross-correlation refinement, 2026-09-17)
 
+Commit e94ba82 (pick the consensus cluster by pair-match votes, not episode cover; drop the run-span
+cap) also landed between the two recorded runs above, so the "after" block below reflects both that
+change and the cross-correlation refinement, not the refinement alone.
+
 ```
 == FamilyGuy02: 21 episodes, detect 2.9s, stages {'probe': 0.15931345800345298, 'fingerprint': 2.743274708001991, 'boundaries': 0.0008170000000973232}
 

@@ -120,6 +120,9 @@ def get_last_fingerprint_stats() -> Dict[str, float]:
 
 # ── Season consensus ────────────────────────────────────────────────────────
 
+# ponytail: mkv chapter markers are not used to adjust boundaries
+# (intro-skipper does); add when a show ships chapters that mark the intro.
+
 _CONSENSUS_TOLERANCE = 3.0  # seconds; pair matches within this of a cluster centre vote together
 
 PairMatch = Tuple[str, Tuple[float, float], str, Tuple[float, float]]
@@ -1130,7 +1133,7 @@ def _log_band_spectrogram(pcm: np.ndarray) -> Optional[np.ndarray]:
     frames = np.lib.stride_tricks.sliding_window_view(pcm, _XCORR_NFFT)[::_XCORR_HOP] * np.hanning(_XCORR_NFFT)
     mag = np.abs(np.fft.rfft(frames, axis=1)).T  # (513, T)
     # ponytail: 44 (not the "obvious" 41) so int-rounding + dedup near the low
-    # end still leaves exactly 40 unique edges → 40 bands, matching the
+    # end still leaves exactly 41 unique edges → 40 bands, matching the
     # documented (40, T) shape.
     edges = np.unique(np.geomspace(4, 512, 44).astype(int))
     bands = np.stack([mag[edges[i]:edges[i + 1]].mean(axis=0) for i in range(len(edges) - 1)])

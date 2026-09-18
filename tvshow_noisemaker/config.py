@@ -12,7 +12,8 @@ Supports a JSON config file with the following optional keys:
         "output_format": "mp3",
         "silence_db": -40.0,
         "min_silence_len": 0.5,
-        "fingerprint_search_window": 300.0
+        "fingerprint_search_window": 300.0,
+        "cut_margin": 0.5
     }
 
 CLI flags always override config file values.
@@ -101,6 +102,9 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
                 raise ValueError(f"Config key '{float_key}' must be a number, got {type(val).__name__}")
             validated[float_key] = float(val)
 
+    if "cut_margin" in validated and validated["cut_margin"] < 0:
+        raise ValueError("Config key 'cut_margin' must be >= 0")
+
     if "mp3_bitrate" in raw:
         val = raw["mp3_bitrate"]
         if not isinstance(val, int) or val <= 0:
@@ -168,7 +172,9 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         "fingerprint_search_window",
         300.0,
     )
-    cut_margin = _pick(getattr(args, "cut_margin", None), "cut_margin", 0.5)
+    cut_margin = float(_pick(getattr(args, "cut_margin", None), "cut_margin", 0.5))
+    if cut_margin < 0:
+        raise ValueError("cut_margin must be >= 0")
     timestamps = config_file_data.get("timestamps", {})
 
     workers_raw = getattr(args, "workers", None)

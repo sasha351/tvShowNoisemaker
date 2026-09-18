@@ -1130,6 +1130,28 @@ def test_refine_uses_xcorr_then_a_one_second_safe_snap_then_margin():
     assert all(c[0] != "/v/r.mkv" for c in calls)
 
 
+def test_refine_skips_a_reference_with_no_boundary_and_tries_the_next():
+    results = {
+        "/v/a.mkv": (50.0, 80.0, 1200.0),
+        "/v/none.mkv": (None, None, None),
+        "/v/r.mkv": (48.0, 78.0, 1190.0),
+    }
+    durations = {"/v/a.mkv": 1300.0, "/v/none.mkv": 1300.0, "/v/r.mkv": 1300.0}
+    refs = {"intro": ["/v/none.mkv", "/v/r.mkv"], "outro": ["/v/none.mkv", "/v/r.mkv"]}
+    calls = []
+
+    def fake_xcorr(ep, t_ep, ref, t_ref, shared):
+        calls.append((ep, ref))
+        return t_ep
+
+    with patch("tvshow_noisemaker.detector._xcorr_boundary", side_effect=fake_xcorr), \
+         patch("tvshow_noisemaker.detector._snap_to_silence", side_effect=lambda fp, t, d, safe="before", **kw: t):
+        _refine_results_with_silence(results, durations, cut_margin=0.0, references=refs)
+
+    a_refs = [ref for ep, ref in calls if ep == "/v/a.mkv"]
+    assert a_refs and all(ref == "/v/r.mkv" for ref in a_refs)
+
+
 def test_refine_falls_back_to_wide_snap_when_xcorr_fails():
     results = {"/v/a.mkv": (0.0, 80.0, 1200.0), "/v/r.mkv": (0.0, 78.0, 1190.0)}
     durations = {"/v/a.mkv": 1300.0, "/v/r.mkv": 1300.0}
