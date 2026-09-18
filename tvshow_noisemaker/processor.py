@@ -9,6 +9,7 @@ Uses ``ffmpeg`` (via ``subprocess``) to either:
 
 from __future__ import annotations
 
+import functools
 import logging
 import subprocess
 from pathlib import Path
@@ -28,9 +29,23 @@ _FORMATS = {
 }
 
 
+@functools.lru_cache(maxsize=None)
+def _aac_encoder() -> str:
+    """``aac_at`` (Apple AudioToolbox, several times faster than ffmpeg's ``aac``) when this ffmpeg has it."""
+    try:
+        listing = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:  # pylint: disable=broad-except
+        return "aac"
+    return "aac_at" if " aac_at " in listing else "aac"
+
+
 def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
     _, codec_args, uses_bitrate = _FORMATS[output_format]
     args = list(codec_args)
+    if output_format == "m4a":
+        args[1] = _aac_encoder()
     if uses_bitrate:
         args.extend(["-ab", f"{mp3_bitrate}k"])
     return args

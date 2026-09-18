@@ -346,3 +346,40 @@ def test_build_artwork_args_populated_for_mp3():
     assert outputs == [
         "-map", "1:v", "-c:v", "copy", "-disposition:v", "attached_pic",
     ]
+
+
+# ---------------------------------------------------------------------------
+# _aac_encoder / _codec_args m4a
+# ---------------------------------------------------------------------------
+
+
+from tvshow_noisemaker.processor import _aac_encoder, _codec_args
+
+
+@pytest.fixture(autouse=True)
+def _reset_aac_probe():
+    _aac_encoder.cache_clear()
+    yield
+    _aac_encoder.cache_clear()
+
+
+def test_aac_encoder_prefers_audiotoolbox_when_listed():
+    listing = " A....D aac                  AAC (Advanced Audio Coding)\n A..... aac_at               aac (AudioToolbox) (codec aac)\n"
+    with patch("tvshow_noisemaker.processor.subprocess.run", return_value=MagicMock(returncode=0, stdout=listing)) as run:
+        assert _aac_encoder() == "aac_at"
+        assert _aac_encoder() == "aac_at"
+    assert run.call_count == 1  # probed once per process
+
+
+def test_aac_encoder_falls_back_to_software_aac():
+    with patch("tvshow_noisemaker.processor.subprocess.run", return_value=MagicMock(returncode=0, stdout=" A....D aac  AAC\n")):
+        assert _aac_encoder() == "aac"
+    with patch("tvshow_noisemaker.processor.subprocess.run", side_effect=OSError("no ffmpeg")):
+        _aac_encoder.cache_clear()
+        assert _aac_encoder() == "aac"
+
+
+def test_codec_args_m4a_uses_probed_encoder():
+    with patch("tvshow_noisemaker.processor._aac_encoder", return_value="aac_at"):
+        assert _codec_args("m4a", 192) == ["-acodec", "aac_at", "-ab", "192k"]
+    assert _codec_args("mp3", 192) == ["-acodec", "libmp3lame", "-ab", "192k"]
