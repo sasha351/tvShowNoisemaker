@@ -12,10 +12,28 @@ from __future__ import annotations
 import functools
 import logging
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Live ffmpeg encodes, so a GUI cancel can terminate them instead of waiting up to 10 minutes.
+_live_ffmpeg: set = set()
+_live_lock = threading.Lock()
+
+
+def terminate_all() -> int:
+    """Terminate every ffmpeg started by :func:`process_file` that is still running."""
+    with _live_lock:
+        procs = list(_live_ffmpeg)
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:  # pylint: disable=broad-except
+            pass
+    return len(procs)
+
 
 # Minimum pre-intro content (seconds) to bother preserving via concat.
 _MIN_COLD_OPEN = 1.0
@@ -125,25 +143,28 @@ def process_file(
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"ffmpeg timed out processing {input_path}"
-        ) from exc
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except FileNotFoundError as exc:
         raise RuntimeError(
             "ffmpeg executable not found – please install ffmpeg and ensure it is on PATH"
         ) from exc
+    with _live_lock:
+        _live_ffmpeg.add(proc)
+    try:
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError(f"ffmpeg timed out processing {input_path}") from exc
+    finally:
+        with _live_lock:
+            _live_ffmpeg.discard(proc)
 
-    if result.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg failed for {input_path} (exit {result.returncode}):\n"
-            f"{result.stderr[-2000:]}"
+            f"ffmpeg failed for {input_path} (exit {proc.returncode}):\n"
+            f"{(stderr or '')[-2000:]}"
         )
 
     logger.info("Written: %s", output_path)

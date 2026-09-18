@@ -1,5 +1,6 @@
 """Tests for tvshow_noisemaker.processor."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,8 +10,10 @@ from tvshow_noisemaker.processor import (
     _aac_encoder,
     _build_artwork_args,
     _codec_args,
+    _live_ffmpeg,
     build_output_path,
     process_file,
+    terminate_all,
 )
 
 
@@ -64,8 +67,10 @@ def test_process_file_raises_if_equal_boundaries():
 
 def test_process_file_success(tmp_path):
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -91,8 +96,10 @@ def test_process_file_writes_metadata(tmp_path):
         "track": "3",
         "genre": "TV Show",
     }
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -111,8 +118,10 @@ def test_process_file_writes_metadata(tmp_path):
 
 def test_process_file_creates_output_dir(tmp_path):
     nested_output = str(tmp_path / "nested" / "deep" / "ep01.mp3")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=nested_output,
@@ -124,10 +133,10 @@ def test_process_file_creates_output_dir(tmp_path):
 
 def test_process_file_raises_on_ffmpeg_failure(tmp_path):
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="ffmpeg error output"
-        )
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=1)
+        proc.communicate.return_value = ("", "ffmpeg error output")
+        mock_run.return_value = proc
         with pytest.raises(RuntimeError, match="ffmpeg failed"):
             process_file(
                 input_path="/input/ep01.mp4",
@@ -138,9 +147,11 @@ def test_process_file_raises_on_ffmpeg_failure(tmp_path):
 
 
 def test_process_file_raises_on_timeout(tmp_path):
-    import subprocess
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 600)):
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_popen:
+        proc = MagicMock()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("ffmpeg", 600), ("", "")]
+        mock_popen.return_value = proc
         with pytest.raises(RuntimeError, match="timed out"):
             process_file(
                 input_path="/input/ep01.mp4",
@@ -152,7 +163,7 @@ def test_process_file_raises_on_timeout(tmp_path):
 
 def test_process_file_raises_if_ffmpeg_not_found(tmp_path):
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run", side_effect=FileNotFoundError("ffmpeg not found")):
+    with patch("tvshow_noisemaker.processor.subprocess.Popen", side_effect=FileNotFoundError("ffmpeg not found")):
         with pytest.raises(RuntimeError, match="ffmpeg executable not found"):
             process_file(
                 input_path="/input/ep01.mp4",
@@ -170,8 +181,11 @@ def test_process_file_raises_if_ffmpeg_not_found(tmp_path):
 ])
 def test_process_file_codec_per_format(tmp_path, fmt, expected_codec_args, bitrate_expected):
     output_path = str(tmp_path / f"ep01.{fmt}")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run, \
+         patch("tvshow_noisemaker.processor._aac_encoder", return_value="aac"):
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -187,8 +201,10 @@ def test_process_file_codec_per_format(tmp_path, fmt, expected_codec_args, bitra
 
 def test_process_file_flac_no_id3v2(tmp_path):
     output_path = str(tmp_path / "ep01.flac")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -205,8 +221,10 @@ def test_process_file_flac_no_id3v2(tmp_path):
 def test_process_file_concat_with_cold_open(tmp_path):
     """When intro_start >= 1s and < intro_end, ffmpeg should use filter_complex."""
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -228,8 +246,10 @@ def test_process_file_concat_with_cold_open(tmp_path):
 def test_process_file_simple_when_no_cold_open(tmp_path):
     """When intro_start is 0 (default), use simple seek-based command."""
     output_path = str(tmp_path / "ep01.mp3")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(
             input_path="/input/ep01.mp4",
             output_path=output_path,
@@ -258,8 +278,11 @@ def _run_process_file(tmp_path, **kwargs):
         "outro_start": 2550.0,
     }
     params.update(kwargs)
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as mock_run, \
+         patch("tvshow_noisemaker.processor._aac_encoder", return_value="aac"):
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        mock_run.return_value = proc
         process_file(**params)
     return mock_run.call_args[0][0]
 
@@ -381,3 +404,39 @@ def test_codec_args_m4a_uses_probed_encoder():
     with patch("tvshow_noisemaker.processor._aac_encoder", return_value="aac_at"):
         assert _codec_args("m4a", 192) == ["-acodec", "aac_at", "-ab", "192k"]
     assert _codec_args("mp3", 192) == ["-acodec", "libmp3lame", "-ab", "192k"]
+
+
+# ---------------------------------------------------------------------------
+# cancellation
+# ---------------------------------------------------------------------------
+
+
+def test_process_file_registers_popen_and_unregisters_after(tmp_path):
+    proc = MagicMock()
+    proc.communicate.return_value = ("", "")
+    proc.returncode = 0
+    with patch("tvshow_noisemaker.processor.subprocess.Popen", return_value=proc) as popen:
+        process_file("/input/ep01.mp4", str(tmp_path / "ep01.mp3"), 30.0, 2550.0)
+    popen.assert_called_once()
+    proc.communicate.assert_called_once_with(timeout=600)
+    assert proc not in _live_ffmpeg
+
+
+def test_terminate_all_terminates_registered_processes():
+    proc = MagicMock()
+    _live_ffmpeg.add(proc)
+    try:
+        assert terminate_all() == 1
+        proc.terminate.assert_called_once()
+    finally:
+        _live_ffmpeg.discard(proc)
+
+
+def test_process_file_kills_on_timeout(tmp_path):
+    proc = MagicMock()
+    proc.communicate.side_effect = [subprocess.TimeoutExpired(cmd="ffmpeg", timeout=600), ("", "")]
+    with patch("tvshow_noisemaker.processor.subprocess.Popen", return_value=proc):
+        with pytest.raises(RuntimeError, match="timed out"):
+            process_file("/input/ep01.mp4", str(tmp_path / "ep01.mp3"), 30.0, 2550.0)
+    proc.kill.assert_called_once()
+    assert proc not in _live_ffmpeg

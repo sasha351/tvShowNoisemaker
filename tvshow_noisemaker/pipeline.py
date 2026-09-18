@@ -353,7 +353,12 @@ def _log_episode(
         )
 
 
-def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -> Plan:
+def detect(
+    input_dir: str,
+    cfg: Config,
+    progress: ProgressFn = _noop_progress,
+    cancel: Optional[threading.Event] = None,
+) -> Plan:
     """Probe, fingerprint and resolve boundaries for every video in *input_dir*."""
     plan = Plan(input_dir=str(input_dir))
     files = list_video_files(input_dir)
@@ -363,6 +368,8 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
     t0 = time.monotonic()
     durations = probe_durations(files, progress)
     plan.stage_timings["probe"] = time.monotonic() - t0
+    if cancel is not None and cancel.is_set():
+        return plan
 
     fingerprint_results: Dict[str, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
     consensus = SeasonConsensus()
@@ -383,6 +390,8 @@ def detect(input_dir: str, cfg: Config, progress: ProgressFn = _noop_progress) -
             )
         progress("fingerprint", len(files), len(files), "Fingerprinting done")
     plan.stage_timings["fingerprint"] = time.monotonic() - t0
+    if cancel is not None and cancel.is_set():
+        return plan
 
     t0 = time.monotonic()
     workers = max(1, min(cfg.workers or max(1, (os.cpu_count() or 2) // 2), len(files)))
@@ -455,13 +464,15 @@ def encode(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    total = len(plan.episodes)
     jobs: List[EpisodePlan] = []
     for ep in plan.episodes:
         if ep.encodable:
             jobs.append(ep)
         else:
-            summary.skipped.append((ep.basename, ep.flags[0] if ep.flags else "Not encodable"))
-    total = len(plan.episodes)
+            reason = ep.flags[0] if ep.flags else "Not encodable"
+            summary.skipped.append((ep.basename, reason))
+            progress("encode", 0, total, f"✗ Skipped – {ep.basename}: {reason}")
     lock = threading.Lock()
 
     def _done_count() -> int:
@@ -516,15 +527,24 @@ def encode(
                     logger.info(
                         "  ✓ Done in %.1fs → %s (%s)", elapsed, Path(output_path).name, fmt_bytes(size),
                     )
+                    message = f"✓ {ep.basename}"
                 except _Cancelled:
                     with lock:
                         summary.cancelled = True
                         summary.skipped.append((ep.basename, "Cancelled"))
+                    message = f"Cancelled – {ep.basename}"
                 except Exception as exc:  # pylint: disable=broad-except
-                    logger.error("  ✗ Failed – %s: %s", ep.basename, exc)
-                    with lock:
-                        summary.failed.append((ep.basename, str(exc)))
-                progress("encode", _done_count(), total, ep.basename)
+                    if cancel is not None and cancel.is_set():
+                        with lock:
+                            summary.cancelled = True
+                            summary.skipped.append((ep.basename, "Cancelled"))
+                        message = f"Cancelled – {ep.basename}"
+                    else:
+                        logger.error("  ✗ Failed – %s: %s", ep.basename, exc)
+                        with lock:
+                            summary.failed.append((ep.basename, str(exc)))
+                        message = f"✗ Failed – {ep.basename}: {exc}"
+                progress("encode", _done_count(), total, message)
         summary.encode_sec = time.monotonic() - t0
     finally:
         shutil.rmtree(artwork_dir, ignore_errors=True)

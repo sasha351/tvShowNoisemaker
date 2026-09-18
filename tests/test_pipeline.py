@@ -568,7 +568,8 @@ def test_encode_reports_progress(tmp_path):
         patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None),
     ):
         encode(plan, Config(), str(tmp_path / "out"), progress=lambda *e: events.append(e))
-    assert events[0][:3] == ("encode", 1, 3)   # the skip counts as done up front
+    assert events[0][:3] == ("encode", 0, 3)   # skip announced up front, before "Starting"
+    assert events[1][:3] == ("encode", 1, 3)   # the skip counts as done in "Starting"
     assert events[-1][:3] == ("encode", 3, 3)
 
 
@@ -586,3 +587,51 @@ def test_encode_workers_respects_explicit_and_job_count():
     assert encode_workers(Config(workers=4), n_jobs=10) == 4
     assert encode_workers(Config(workers=4), n_jobs=2) == 2
     assert encode_workers(Config(), n_jobs=0) == 1
+
+
+# ---------------------------------------------------------------------------
+# cancellation / outcome-bearing progress
+# ---------------------------------------------------------------------------
+
+
+def test_detect_returns_empty_plan_when_cancelled_before_fingerprinting(tmp_path):
+    (tmp_path / "ep01.mp4").touch(); (tmp_path / "ep02.mp4").touch()
+    cancel = threading.Event(); cancel.set()
+    with patch("tvshow_noisemaker.pipeline.probe_durations", return_value={}) as probe, \
+         patch("tvshow_noisemaker.pipeline.detect_by_fingerprinting") as fp:
+        plan = detect(str(tmp_path), Config(), cancel=cancel)
+    assert plan.episodes == []
+    fp.assert_not_called()
+
+
+def test_encode_progress_messages_carry_outcomes(tmp_path):
+    plan = _plan(tmp_path)
+    plan.episodes[1].confidence = "skip"; plan.episodes[1].flags = ["No intro/outro boundaries detected (skipped to avoid full-file conversion)"]
+    messages = []
+
+    def _fail_second(**kwargs):
+        if kwargs["input_path"].endswith("ep03.mp4"):
+            raise RuntimeError("boom")
+
+    with patch("tvshow_noisemaker.pipeline.process_file", side_effect=_fail_second), \
+         patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None):
+        encode(plan, Config(workers=1), str(tmp_path / "out"), progress=lambda s, d, t, m: messages.append(m))
+    assert "✓ ep01.mp4" in messages
+    assert "✗ Skipped – ep02.mp4: No intro/outro boundaries detected (skipped to avoid full-file conversion)" in messages
+    assert "✗ Failed – ep03.mp4: boom" in messages
+
+
+def test_encode_counts_terminated_ffmpeg_as_cancelled_not_failed(tmp_path):
+    plan = _plan(tmp_path)
+    cancel = threading.Event()
+
+    def _terminated(**kwargs):
+        cancel.set()  # cancel arrives while this file is encoding; ffmpeg dies with an error
+        raise RuntimeError("ffmpeg failed (exit -15)")
+
+    with patch("tvshow_noisemaker.pipeline.process_file", side_effect=_terminated), \
+         patch("tvshow_noisemaker.pipeline.resolve_artwork", return_value=None):
+        summary = encode(plan, Config(workers=1), str(tmp_path / "out"), cancel=cancel)
+    assert summary.failed == []
+    assert summary.cancelled is True
+    assert len(summary.skipped) == 3 and all(reason == "Cancelled" for _, reason in summary.skipped)
