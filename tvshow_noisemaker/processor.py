@@ -47,6 +47,9 @@ def terminate_all() -> int:
 # Minimum pre-intro content (seconds) to bother preserving via concat.
 _MIN_COLD_OPEN = 1.0
 
+# Concat encode reads the input up to outro_start plus this, so atrim's end is never starved.
+_CONCAT_READ_SLACK = 1.0
+
 # Stream copy: the input seek lands on a keyframe at or before ``cut - _COPY_PREROLL``; an
 # output-side seek then drops whole packets up to the exact cut (one AAC frame, ~21 ms).
 _COPY_PREROLL = 10.0
@@ -340,6 +343,8 @@ def _build_concat_cmd(
     cmd = [
         "ffmpeg",
         "-y",
+        # Stop reading at the cut: atrim discards the credits, but ffmpeg would still decode them.
+        "-t", str(outro_start + _CONCAT_READ_SLACK),
         "-i", input_path,
         *art_in,
         "-filter_complex", filter_complex,

@@ -170,3 +170,12 @@ def test_stream_copy_embeds_artwork(aac_episode, tmp_path):
     streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name",
                               "-of", "csv=p=0", out], capture_output=True, text=True).stdout.split()
     assert "aac" in streams and "mjpeg" in streams
+
+
+@needs_ffmpeg
+def test_concat_encode_keeps_full_content_with_read_limit(aac_episode, tmp_path):
+    out = str(tmp_path / "out.mp3")
+    process_file(aac_episode, out, intro_start=10.0, intro_end=40.0, outro_start=100.0, output_format="mp3")
+    runs = [(f, d) for f, d in _tone_runs(out) if d > 0.1]
+    assert [f for f, _ in runs] == [440, 1320]
+    assert runs[1][1] == pytest.approx(60.0, abs=0.15)  # content not cut short by -t

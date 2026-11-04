@@ -456,3 +456,11 @@ def test_process_file_passes_mp3_quality(tmp_path):
         process_file("/in.mkv", str(tmp_path / "a.mp3"), 30.0, 100.0, intro_start=5.0, mp3_quality=7)
     cmd = popen.call_args[0][0]
     assert cmd[cmd.index("-compression_level") + 1] == "7"
+
+
+def test_concat_cmd_stops_reading_after_outro_start():
+    from tvshow_noisemaker.processor import _build_concat_cmd
+    cmd = _build_concat_cmd("/in.mkv", "/out.mp3", 10.0, 40.0, 1290.0, 256)
+    i = cmd.index("-i")
+    assert cmd[i - 2:i] == ["-t", "1291.0"]  # input option, before -i
+    assert "atrim=start=40.0:end=1290.0" in cmd[cmd.index("-filter_complex") + 1]
