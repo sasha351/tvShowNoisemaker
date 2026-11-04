@@ -4,23 +4,39 @@ Version: 2.1.0
 
 `tvshow-noisemaker` trims TV intros/outros from episode video files and exports tagged MP3s.
 
-## Installation
+## Install the Mac app
+
+1. Open the [latest release](https://github.com/sasha351/tvShowNoisemaker/releases/latest) and download the `.dmg` for your Mac:
+   - `TV-Show-Noisemaker-macOS-arm64.dmg` for Apple Silicon (M1 and later)
+   - `TV-Show-Noisemaker-macOS-x86_64.dmg` for Intel
+2. Open the `.dmg` and drag **TV Show Noisemaker** onto **Applications**.
+3. The first time only: the app is not notarized by Apple, so macOS blocks it. Open it once, click **Done**, then go to **System Settings → Privacy & Security** and click **Open Anyway** next to the TV Show Noisemaker message. Or run this in Terminal:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/TV Show Noisemaker.app"
+   ```
+
+You don't need Python, Homebrew or git. ffmpeg, ffprobe and fpcalc are inside the app. If Homebrew's `ffmpeg` is installed, the app uses it instead, because it has Apple's faster AAC encoder for `m4a`.
+
+### Updates
+
+At each launch the app asks GitHub for the newest release. When one exists, an **Update to X.Y.Z** button shows in the footer next to the version. Click it: the app downloads the release, checks its size and SHA-256, quits, replaces itself and reopens. It never updates in the middle of a batch. To skip the check, launch with `TVSN_NO_UPDATE=1`.
+
+If the app is in a folder your user cannot write to, the update fails with a message in the activity feed. Move the app to `/Applications` (as an admin user) or `~/Applications`.
+
+## Install from source (CLI, development)
 
 Requirements:
 
-- Python 3.9+
-- `ffmpeg` and `ffprobe`
+- Python 3.9+ (with Tk for the GUI)
+- `ffmpeg` and `ffprobe` (installed automatically through `static-ffmpeg` if missing)
 - Recommended: `fpcalc` (Chromaprint)
 
-Install project dependencies:
-
 ```bash
-pip install -e .
-```
-
-Install optional system packages:
-
-```bash
+git clone https://github.com/sasha351/tvShowNoisemaker.git
+cd tvShowNoisemaker
+python3 -m venv .venv
+.venv/bin/pip install -e .
 brew install ffmpeg chromaprint
 ```
 
@@ -40,6 +56,8 @@ chmod +x "$HOME/bin/tvshow-noisemaker"
 Make sure `$HOME/bin` is in your `PATH`.
 
 If conda is installed, the pip-generated entry point (`.venv/bin/tvshow-noisemaker`) can intermittently fail with `ModuleNotFoundError` outside the project directory. This is a known conda + editable install interaction where `.pth` handling can be inconsistent. The wrapper above is the reliable fix because it runs `python -m` with `PYTHONPATH` set explicitly.
+
+To update a source checkout to the newest release, run `python -m tvshow_noisemaker.updater`. It fast-forwards `main` to the newest `vX.Y.Z` tag and skips the update when that is not safe (another branch, uncommitted changes, local commits).
 
 ## What It Does
 
@@ -111,33 +129,32 @@ Episodes the detector isn't confident about (no intro/credits match, a credits-l
 
 Click Cancel (the Start button relabels itself once running) to stop the whole batch: in-flight and queued encodes are dropped and the review panel is cleared. For workers, fingerprinting, or config-file control, use the CLI directly.
 
-Built on customtkinter, installed automatically as a project dependency — no separate setup beyond installing the package.
+From a source install, start the GUI with `tvshow-noisemaker-gui`. Built on customtkinter.
 
-### Desktop App Shortcut
+### Launcher for a source checkout
 
-For a double-clickable launcher (no terminal at all), run once:
+If you run from source rather than the downloaded app, `./build_app.sh` installs a `TV Show Noisemaker.app` launcher to `~/Applications` that starts the GUI from your clone. At each launch it fast-forwards the clone to the newest release tag, as described in [Install from source](#install-from-source-cli-development). The footer shows `2.1.0 · 2026-11-04` on a release or `2.1.0 + 3 · abc1234` past one, plus `updates paused` when the update was skipped (the reason is in the activity feed). Rerun the script after you move the repo.
 
-```bash
-./build_app.sh
-```
+## Releasing
 
-This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight/Launchpad. Drag it to the Dock for a permanent icon. Rerun the script any time (e.g. after moving the repo) to rebuild it.
-
-#### Automatic updates
-
-Each launch of the app updates your clone to the newest release, a `vX.Y.Z` tag on `main`. Commits pushed to `main` without a release are not picked up. It only fast-forwards `main` and never merges or discards anything: when you are on another branch, have uncommitted changes or local commits, or are offline, it launches as is and the footer says `updates paused` (the reason is in the activity feed). If `pyproject.toml` changed, dependencies are reinstalled. Launch with `TVSN_NO_UPDATE=1` to skip the check.
-
-The footer shows what is running: `2.1.0 · 2026-11-04` on a release, `2.1.0 + 3 · abc1234` when you are past one. After an update the activity feed lists what changed. From the terminal: `tvshow-noisemaker --version`. Run `python -m tvshow_noisemaker.updater` to update by hand.
-
-#### Cutting a release
-
-From an up-to-date, clean `main`:
+Releases are `vX.Y.Z` tags on `main`. From an up-to-date, clean `main`:
 
 ```bash
 tools/release.sh 2.2.0
 ```
 
-It runs the tests, bumps `__version__` (the only place the version lives), commits, tags `v2.2.0` with the commit list as notes, and pushes both. Installed apps pick it up on their next launch.
+The script runs the tests, sets `__version__` (the only place the version lives), commits, tags `v2.2.0` with the commit list as notes, and pushes. The tag starts the **macOS app** workflow (`.github/workflows/macos-app.yml`). The workflow:
+
+1. runs the tests,
+2. builds the app for Apple Silicon and Intel (`tools/build_macos_app.sh`, PyInstaller),
+3. launches each build once as a smoke test,
+4. publishes the GitHub Release with a `.dmg` and a `.zip` per CPU.
+
+Installed apps find the release on their next launch. Commits pushed to `main` without a tag are never shipped.
+
+The repository must stay public. The app checks for updates and downloads them without credentials, and that does not work on a private repo.
+
+To build the app locally on a Mac, run `tools/build_macos_app.sh`. The output goes to `dist/`.
 
 ## CLI Flags (Most Used)
 

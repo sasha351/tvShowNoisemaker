@@ -27,8 +27,12 @@ jobs:
         include:
           - runner: macos-14        # Apple Silicon
             arch: arm64
-          - runner: macos-15-intel  # Intel
+            extras: dev,stft
+            pytest_args: ""
+          - runner: macos-15-intel  # Intel: librosa's llvmlite has no Intel-Mac wheels, skip its tests
             arch: x86_64
+            extras: dev
+            pytest_args: -k "not stft_fallback"
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +49,8 @@ jobs:
 
       - name: Tests
         run: |
-          python -m pip install --quiet -e ".[dev,stft]"
-          python -m pytest -q
+          python -m pip install --quiet -e ".[${{ matrix.extras }}]"
+          python -m pytest -q ${{ matrix.pytest_args }}
 
       - name: Build app
         run: PYTHON=python tools/build_macos_app.sh
@@ -62,6 +66,29 @@ jobs:
           cat "$report"
           if grep -q MISSING "$report"; then exit 1; fi
           file "dist/TV Show Noisemaker.app/Contents/MacOS/TV Show Noisemaker" | grep -q "${{ matrix.arch }}"
+
+      - name: Update path (unzip release, swap bundle in place)
+        run: |
+          apps="$RUNNER_TEMP/Applications"
+          mkdir -p "$apps"
+          ditto "dist/TV Show Noisemaker.app" "$apps/TV Show Noisemaker.app"
+          echo stale > "$apps/TV Show Noisemaker.app/Contents/stale-marker"
+          python - "$apps/TV Show Noisemaker.app" <<'PY'
+          import subprocess, sys, tempfile
+          from pathlib import Path
+          from tvshow_noisemaker import appupdate
+          work = Path(tempfile.mkdtemp())
+          new = appupdate.unpack(Path("dist") / appupdate.asset_name(), work / "new")
+          (work / "swap.sh").write_text(appupdate.SWAP_SCRIPT)
+          dead = subprocess.Popen(["true"]); dead.wait()  # an app that already quit
+          subprocess.run(["/bin/bash", str(work / "swap.sh"), str(dead.pid), str(new), sys.argv[1], str(work)],
+                         check=True, timeout=60)
+          assert not work.exists()
+          PY
+          app="$apps/TV Show Noisemaker.app"
+          [[ ! -e "$app/Contents/stale-marker" ]]
+          codesign --verify --deep --strict "$app"
+          sleep 5; pkill -f "$apps/TV Show Noisemaker.app" || true
 
       - uses: actions/upload-artifact@v4
         with:
