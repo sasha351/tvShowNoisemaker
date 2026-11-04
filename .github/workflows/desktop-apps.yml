@@ -1,26 +1,31 @@
-name: macOS app
+name: Desktop apps
 
-# Pushing a vX.Y.Z tag (tools/release.sh does) builds the app and publishes the GitHub Release
-# the installed apps update from.  Changes to the packaging are build-checked on any branch.
+# Pushing a vX.Y.Z tag (tools/release.sh does) builds the installers and publishes the GitHub
+# Release the installed apps update from: a .dmg per Mac CPU and a Setup.exe for Windows.
+# Changes to the packaging are build-checked on any branch.
 on:
   push:
     tags: ["v*.*.*"]
     branches: ["**"]
     paths:
       - "packaging/**"
-      - "tools/build_macos_app.sh"
-      - ".github/workflows/macos-app.yml"
+      - "tools/build_*_app.sh"
+      - ".github/workflows/desktop-apps.yml"
       - "pyproject.toml"
-      - "tvshow_noisemaker/appupdate.py"
-      - "tvshow_noisemaker/gui.py"
+      - "tvshow_noisemaker/**"
+      - "tests/**"
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  build:
+  macos:
     strategy:
       fail-fast: false
       matrix:
@@ -33,10 +38,10 @@ jobs:
             arch: x86_64
             extras: dev
             pytest_args: -k "not stft_fallback"
+    name: macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -52,7 +57,7 @@ jobs:
           python -m pip install --quiet -e ".[${{ matrix.extras }}]"
           python -m pytest -q ${{ matrix.pytest_args }}
 
-      - name: Build app
+      - name: Build app and disk image
         run: PYTHON=python tools/build_macos_app.sh
 
       - name: Smoke test the built app
@@ -67,7 +72,7 @@ jobs:
           if grep -q MISSING "$report"; then exit 1; fi
           file "dist/TV Show Noisemaker.app/Contents/MacOS/TV Show Noisemaker" | grep -q "${{ matrix.arch }}"
 
-      - name: Update path (unzip release, swap bundle in place)
+      - name: Update path (copy app out of the dmg, swap bundle in place)
         run: |
           apps="$RUNNER_TEMP/Applications"
           mkdir -p "$apps"
@@ -92,15 +97,74 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: app-${{ matrix.arch }}
-          path: |
-            dist/*.zip
-            dist/*.dmg
+          name: macos-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests (updater)
+        run: |
+          python -m pip install --quiet -e ".[dev]"
+          python -m pytest -q tests/test_appupdate.py
+
+      - name: Build installer
+        run: PYTHON=python tools/build_windows_app.sh
+
+      - name: Smoke test the built app
+        run: |
+          report="$RUNNER_TEMP/smoke.txt"
+          TVSN_NO_UPDATE=1 TVSN_SMOKE_REPORT="$(cygpath -w "$report")" "dist/TV Show Noisemaker/TV Show Noisemaker.exe" &
+          for _ in $(seq 1 90); do [[ -s "$report" ]] && break; sleep 1; done
+          taskkill //F //IM "TV Show Noisemaker.exe" >/dev/null 2>&1 || true
+          cat "$report"
+          if grep -q MISSING "$report"; then exit 1; fi
+
+      - name: Install, launch, upgrade over the running app, uninstall
+        env:
+          TVSN_NO_UPDATE: "1"
+        run: |
+          setup="dist/TV-Show-Noisemaker-Windows-x64-Setup.exe"
+          dir="$RUNNER_TEMP/TVSN"
+          windir="$(cygpath -w "$dir")"
+          # Fresh install (the installer starts the app when done, as after an in-app update).
+          "$setup" //VERYSILENT //SUPPRESSMSGBOXES //NORESTART "//DIR=$windir"
+          [[ -f "$dir/TV Show Noisemaker.exe" && -f "$dir/unins000.exe" ]]
+          echo stale > "$dir/_internal/stale-marker"
+          sleep 5
+          tasklist | grep -i "TV Show Noisemaker" || { echo "::error::app did not start after install"; exit 1; }
+          # What the in-app updater runs: silent, closes the running app, reopens it.
+          "$setup" //SILENT //SUPPRESSMSGBOXES //NORESTART //CLOSEAPPLICATIONS "//DIR=$windir"
+          [[ ! -e "$dir/_internal/stale-marker" ]]
+          # The installed copy works.
+          taskkill //F //IM "TV Show Noisemaker.exe" >/dev/null 2>&1 || true
+          report="$RUNNER_TEMP/installed.txt"
+          TVSN_SMOKE_REPORT="$(cygpath -w "$report")" "$dir/TV Show Noisemaker.exe" &
+          for _ in $(seq 1 90); do [[ -s "$report" ]] && break; sleep 1; done
+          taskkill //F //IM "TV Show Noisemaker.exe" >/dev/null 2>&1 || true
+          cat "$report"
+          if grep -q MISSING "$report"; then exit 1; fi
+          # Clean uninstall.
+          "$dir/unins000.exe" //VERYSILENT //SUPPRESSMSGBOXES //NORESTART
+          for _ in $(seq 1 30); do [[ ! -e "$dir/TV Show Noisemaker.exe" ]] && break; sleep 1; done
+          [[ ! -e "$dir/TV Show Noisemaker.exe" ]]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.exe
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

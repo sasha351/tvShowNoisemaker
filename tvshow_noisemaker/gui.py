@@ -919,6 +919,7 @@ def _smoke_test(root: ctk.CTk, report: str) -> None:
 
 def main() -> None:
     appupdate.extend_path()
+    appupdate.hide_child_consoles()
     ctk.set_appearance_mode("system")
     ui.apply_theme()
     root = ctk.CTk()

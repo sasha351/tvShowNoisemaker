@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Build the self-contained TV Show Noisemaker.app (Python, ffmpeg, ffprobe and fpcalc inside)
-# plus the release files in dist/:
-#   TV-Show-Noisemaker-macOS-<arch>.zip  what the in-app updater downloads
-#   TV-Show-Noisemaker-macOS-<arch>.dmg  drag-to-Applications installer for people
+# and its drag-to-Applications disk image, dist/TV-Show-Noisemaker-macOS-<arch>.dmg (what people
+# install and what the in-app updater downloads).
 # Run on a Mac from the repo root; CI runs it on every release tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,7 +15,7 @@ WORK="build/macos"
 TOOLS="$WORK/tools"
 FPCALC_VERSION="1.5.1"
 
-rm -rf "$WORK" "dist/$NAME.app" "dist/$NAME" "dist/$BASE".{zip,dmg}
+rm -rf "$WORK" "dist/$NAME.app" "dist/$NAME" "dist/$BASE.dmg"
 mkdir -p "$TOOLS"
 
 "$PY" -m pip install --quiet --upgrade pip
@@ -49,14 +48,12 @@ iconutil -c icns "$ICONSET" -o "$WORK/AppIcon.icns"
 
 TVSN_TOOLS_DIR="$PWD/$TOOLS" TVSN_VERSION="$VERSION" TVSN_ICON="$PWD/$WORK/AppIcon.icns" \
     "$PY" -m PyInstaller --noconfirm --clean --distpath dist --workpath "$WORK/pyinstaller" \
-    packaging/macos/noisemaker.spec
+    packaging/noisemaker.spec
 
 APP="dist/$NAME.app"
 # Ad-hoc signature over the whole bundle: Apple Silicon refuses to run unsigned code.
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
-
-ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$BASE.zip"
 
 DMG_DIR="$WORK/dmg"
 mkdir -p "$DMG_DIR"
@@ -65,4 +62,4 @@ ln -s /Applications "$DMG_DIR/Applications"
 hdiutil create -quiet -volname "$NAME" -srcfolder "$DMG_DIR" -ov -format UDZO "dist/$BASE.dmg"
 
 echo "Built $APP ($VERSION, $ARCH)"
-ls -lh "dist/$BASE".{zip,dmg}
+ls -lh "dist/$BASE.dmg"

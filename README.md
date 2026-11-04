@@ -4,9 +4,23 @@ Version: 2.2.0
 
 `tvshow-noisemaker` trims TV intros/outros from episode video files and exports tagged MP3s.
 
-## Install the Mac app
+## Install
 
-1. Open the [latest release](https://github.com/sasha351/tvShowNoisemaker/releases/latest) and download the `.dmg` for your Mac:
+Every release has one installer per platform on the [latest release](https://github.com/sasha351/tvShowNoisemaker/releases/latest) page:
+
+| Platform | File |
+|---|---|
+| Mac with Apple Silicon (M1 and later) | `TV-Show-Noisemaker-macOS-arm64.dmg` |
+| Mac with Intel | `TV-Show-Noisemaker-macOS-x86_64.dmg` |
+| Windows 10/11 (64-bit) | `TV-Show-Noisemaker-Windows-x64-Setup.exe` |
+
+GitHub also lists "Source code (zip/tar.gz)" on every release. You don't need those to install the app.
+
+You don't need Python, Homebrew or git on either platform. ffmpeg, ffprobe and fpcalc are inside the app.
+
+### Mac
+
+1. Download the `.dmg` for your Mac:
    - `TV-Show-Noisemaker-macOS-arm64.dmg` for Apple Silicon (M1 and later)
    - `TV-Show-Noisemaker-macOS-x86_64.dmg` for Intel
 2. Open the `.dmg` and drag **TV Show Noisemaker** onto **Applications**.
@@ -16,13 +30,30 @@ Version: 2.2.0
    xattr -dr com.apple.quarantine "/Applications/TV Show Noisemaker.app"
    ```
 
-You don't need Python, Homebrew or git. ffmpeg, ffprobe and fpcalc are inside the app. If Homebrew's `ffmpeg` is installed, the app uses it instead, because it has Apple's faster AAC encoder for `m4a`.
+If Homebrew's `ffmpeg` is installed, the app uses it instead, because it has Apple's faster AAC encoder for `m4a`.
+
+To uninstall, drag the app from Applications to the Trash.
+
+### Windows
+
+1. Download `TV-Show-Noisemaker-Windows-x64-Setup.exe` and run it.
+2. The installer is not code-signed, so Windows SmartScreen may warn about it. Click **More info**, then **Run anyway**.
+3. Follow the installer. It installs for your user only, so it doesn't ask for admin rights. It adds a Start menu entry, and a desktop shortcut if you tick that box.
+
+To uninstall, go to **Settings → Apps → Installed apps → TV Show Noisemaker → Uninstall**.
 
 ### Updates
 
-At each launch the app asks GitHub for the newest release. When one exists, an **Update to X.Y.Z** button shows in the footer next to the version. Click it: the app downloads the release, checks its size and SHA-256, quits, replaces itself and reopens. It never updates in the middle of a batch. To skip the check, launch with `TVSN_NO_UPDATE=1`.
+At each launch the app asks GitHub for the newest release. When one exists, an **Update to X.Y.Z** button shows in the footer next to the version. Click it: the app downloads that release's installer for your platform, checks its size and SHA-256, and installs it.
 
-If the app is in a folder your user cannot write to, the update fails with a message in the activity feed. Move the app to `/Applications` (as an admin user) or `~/Applications`.
+- On Mac, the app copies the new version out of the `.dmg`, quits, replaces itself and reopens.
+- On Windows, the app runs the new `Setup.exe` silently. The installer closes the app, upgrades it in place (old files are removed) and reopens it.
+
+It never updates in the middle of a batch. To skip the check, launch with `TVSN_NO_UPDATE=1`.
+
+On Mac, if the app is in a folder your user cannot write to, the update fails with a message in the activity feed. Move the app to `/Applications` (as an admin user) or `~/Applications`.
+
+Mac apps on 2.2.0 look for a `.zip` in each release, and releases now only carry the `.dmg`. Reinstall once from the `.dmg` to get updates again.
 
 ## Install from source (CLI, development)
 
@@ -143,18 +174,19 @@ Releases are `vX.Y.Z` tags on `main`. From an up-to-date, clean `main`:
 tools/release.sh 2.2.0
 ```
 
-The script runs the tests, sets `__version__` (the only place the version lives), commits, tags `v2.2.0` with the commit list as notes, and pushes. The tag starts the **macOS app** workflow (`.github/workflows/macos-app.yml`). The workflow:
+The script runs the tests, sets `__version__` (the only place the version lives), commits, tags `v2.2.0` with the commit list as notes, and pushes. The tag starts the **Desktop apps** workflow (`.github/workflows/desktop-apps.yml`). The workflow:
 
 1. runs the tests,
-2. builds the app for Apple Silicon and Intel (`tools/build_macos_app.sh`, PyInstaller),
+2. builds the Mac app for Apple Silicon and Intel (`tools/build_macos_app.sh`) and the Windows installer (`tools/build_windows_app.sh`, Inno Setup), all with PyInstaller,
 3. launches each build once as a smoke test,
-4. publishes the GitHub Release with a `.dmg` and a `.zip` per CPU.
+4. checks the update paths: on Mac it copies the app out of the `.dmg` and swaps it in place; on Windows it installs, upgrades over the running app, then uninstalls,
+5. publishes the GitHub Release with the three installers.
 
 Installed apps find the release on their next launch. Commits pushed to `main` without a tag are never shipped.
 
 The repository must stay public. The app checks for updates and downloads them without credentials, and that does not work on a private repo.
 
-To build the app locally on a Mac, run `tools/build_macos_app.sh`. The output goes to `dist/`.
+To build locally, run `tools/build_macos_app.sh` on a Mac, or `tools/build_windows_app.sh` in Git Bash on Windows. The output goes to `dist/`.
 
 ## CLI Flags (Most Used)
 

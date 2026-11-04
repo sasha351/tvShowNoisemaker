@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -85,7 +86,7 @@ def snippet_cmd(path: str, t: float, out_wav: str, span: float = 6.0) -> List[st
 
 
 class SnippetPlayer:
-    """Play a short snippet around a cut: ffmpeg → wav in a temp dir → afplay, on a thread."""
+    """Play a short snippet around a cut: ffmpeg → wav in a temp dir → afplay (macOS) or winsound (Windows), on a thread."""
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
@@ -106,7 +107,11 @@ class SnippetPlayer:
         with self._lock:
             if gen != self._gen:
                 return  # stop() (or a newer play()) landed while ffmpeg was running
-            self._proc = subprocess.Popen(["afplay", wav])  # ponytail: macOS only, like the folder picker
+            if sys.platform == "win32":
+                import winsound  # plays asynchronously; stop() silences it
+                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            self._proc = subprocess.Popen(["afplay", wav])  # macOS
             proc = self._proc
         proc.wait()
 
@@ -114,6 +119,9 @@ class SnippetPlayer:
         with self._lock:
             self._gen += 1
             proc, self._proc = self._proc, None
+        if sys.platform == "win32":
+            import winsound
+            winsound.PlaySound(None, 0)
         if proc is not None:
             try:
                 proc.terminate()
