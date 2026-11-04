@@ -52,9 +52,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # --- Launcher ---
+# Fast-forwards the clone to origin/main before each launch (skipped when it is not safe,
+# see tvshow_noisemaker/updater.py).  Set TVSN_NO_UPDATE=1 to launch without updating.
 cat > "$APP/Contents/MacOS/launcher" <<LAUNCHER
 #!/bin/zsh
-PYTHONPATH="$SRC" exec "$SRC/.venv/bin/python3" -m tvshow_noisemaker.gui
+export PYTHONPATH="$SRC"
+if [[ -z "\${TVSN_NO_UPDATE:-}" ]]; then
+    "$SRC/.venv/bin/python3" -m tvshow_noisemaker.updater >/dev/null 2>&1 || true
+fi
+exec "$SRC/.venv/bin/python3" -m tvshow_noisemaker.gui
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/launcher"
 

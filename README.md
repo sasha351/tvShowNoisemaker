@@ -123,6 +123,12 @@ For a double-clickable launcher (no terminal at all), run once:
 
 This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight/Launchpad. Drag it to the Dock for a permanent icon. Rerun the script any time (e.g. after moving the repo) to rebuild it.
 
+#### Automatic updates
+
+Each launch of the app fast-forwards your clone to `origin/main` first, so it always runs the latest version. It never merges or discards anything: when you are on another branch, have uncommitted changes or local commits, or are offline, it launches as is and the footer says `updates paused` (the reason is in the activity feed). If `pyproject.toml` changed, dependencies are reinstalled. Launch with `TVSN_NO_UPDATE=1` to skip the check.
+
+The footer shows the running version as `version · commit · date`, and after an update the activity feed lists what changed. From the terminal: `tvshow-noisemaker --version`. Run `python -m tvshow_noisemaker.updater` to update by hand.
+
 ## CLI Flags (Most Used)
 
 | Flag | Default | Purpose |

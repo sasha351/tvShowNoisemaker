@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from tvshow_noisemaker.updater import version_label
 from tvshow_noisemaker.config import VALID_OUTPUT_FORMATS, build_config, load_config
 from tvshow_noisemaker.pipeline import (
     Plan,
@@ -108,6 +109,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {version_label()}",
     )
 
     # Required

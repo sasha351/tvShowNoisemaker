@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from tvshow_noisemaker import ui
+from tvshow_noisemaker import ui, updater
 from tvshow_noisemaker.config import Config
 from tvshow_noisemaker.pipeline import EpisodePlan, Plan, Summary, detect, encode
 from tvshow_noisemaker.processor import terminate_all
@@ -179,6 +179,7 @@ class App:
 
         self.dst.trace_add("write", self._update_start_state)
         self._update_start_state()
+        self._show_update_note()
 
     # The current batch's queues; workers use their own _Batch, never these.
     q = property(lambda self: self.batch.q)
@@ -382,12 +383,37 @@ class App:
             text_color_disabled=ui.MUTED, command=self._start_or_cancel,
         )
         self.start_btn.pack(side="right")
+        self.version = ctk.CTkLabel(
+            bar, text=updater.version_label(), font=self.font["small"], text_color=ui.MUTED, height=16,
+        )
+        self.version.pack(side="right", padx=16)
         # Packed above the footer when shown; side="bottom" stacks upward.
         self.details_frame = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
         self.log = ctk.CTkTextbox(
             self.details_frame, state="disabled", wrap="none", height=140, font=self.font["mono_small"],
         )
         self.log.pack(fill="both", expand=True)
+
+    def _show_update_note(self) -> None:
+        """Say what the launcher's self-update did: what changed once, or why it is paused."""
+        result = updater.load()
+        if result is None:
+            return
+        if result.status == "updated" and not result.seen:
+            count = len(result.changes)
+            self._activity_append(
+                f"Updated {result.old[:7]} → {result.new[:7]} · {count} {'change' if count == 1 else 'changes'}"
+            )
+            for subject in result.changes[:8]:
+                self._activity_append(f"  {subject}")
+            result.seen = True
+            try:
+                updater.save(result)
+            except OSError:
+                pass
+        elif result.status in ("skipped", "failed"):
+            self.version.configure(text=f"{self.version.cget('text')} · updates paused")
+            self._activity_append(f"Not updated from GitHub: {result.reason}")
 
     def _toggle_details(self) -> None:
         self._details_shown = not self._details_shown
