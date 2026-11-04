@@ -218,3 +218,13 @@ def test_mp3_quality_default_file_and_cli(tmp_path):
         cfg_file.write_text(json.dumps({"mp3_quality": bad}))
         with pytest.raises(ValueError, match="mp3_quality"):
             load_config(str(cfg_file))
+
+
+def test_fast_loose_defaults_off(tmp_path):
+    assert build_config(_FakeArgs(), {}).fast_loose is False
+    assert build_config(_FakeArgs(), {"fast_loose": True}).fast_loose is True
+    assert build_config(_FakeArgs(fast_loose=True), {}).fast_loose is True
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"fast_loose": 1}))
+    with pytest.raises(ValueError, match="fast_loose"):
+        load_config(str(cfg_file))

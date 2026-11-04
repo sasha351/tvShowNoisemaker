@@ -33,6 +33,11 @@ from tvshow_noisemaker.review import (
 _POLL_MS = 100
 _FORMATS = ("mp3", "m4a", "flac", "wav")
 _LOSSLESS_FORMATS = ("flac", "wav")
+_LOOSE_FORMATS = ("mp3", "m4a")  # formats "Fast & loose" can stream-copy into
+_LOOSE_NOTE = (
+    "Cuts mp3/AAC audio without re-encoding: seconds per episode. You lose: cuts land "
+    "within ~26 ms, a cold-open join can blip, files keep the source bitrate."
+)
 _BITRATES = ("128", "192", "256", "320")
 _STOP = ("stop",)  # encode-queue sentinel: the Tk thread says no more jobs are coming
 _FIELDS = (("intro_start", "Intro start"), ("intro_end", "Intro end"), ("outro_start", "Credits start"))
@@ -97,13 +102,17 @@ class _Batch:
     id: int
     fmt: str = "mp3"
     bitrate: str = "256"
+    fast_loose: bool = False
     q: "queue.Queue" = field(default_factory=queue.Queue)      # (batch id, message) to the Tk thread
     jobs: "queue.Queue" = field(default_factory=queue.Queue)   # encode jobs, Tk thread -> encode worker
     cancel: threading.Event = field(default_factory=threading.Event)
     detect_done: threading.Event = field(default_factory=threading.Event)
 
     def cfg(self, workers: int | None = None) -> Config:
-        return Config(output_format=self.fmt, mp3_bitrate=int(self.bitrate), workers=workers)
+        return Config(
+            output_format=self.fmt, mp3_bitrate=int(self.bitrate), workers=workers,
+            fast_loose=self.fast_loose,
+        )
 
     def post(self, *msg) -> None:
         self.q.put((self.id, msg))
@@ -322,10 +331,31 @@ class App:
             checkbox_width=18, checkbox_height=18,
         ).pack(side="right")
 
+        # Row 2: trade exactness for speed.  Detection is the same either way.
+        loose = ctk.CTkFrame(grid, fg_color="transparent", corner_radius=0)
+        loose.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(ui.STACK, 0))
+        self.fast_loose = tk.BooleanVar(value=False)
+        self.loose_box = ctk.CTkCheckBox(
+            loose, text="Fast & loose", variable=self.fast_loose, font=self.font["body"],
+            checkbox_width=18, checkbox_height=18,
+        )
+        self.loose_box.pack(anchor="w")
+        note_indent = 26  # checkbox + its gap, so the note lines up under the label text
+        self.loose_note = ctk.CTkLabel(
+            loose, text=_LOOSE_NOTE, font=self.font["small"], text_color=ui.MUTED,
+            anchor="w", justify="left", wraplength=400,
+        )
+        self.loose_note.pack(anchor="w", fill="x", padx=(note_indent, 0), pady=(2, 0))
+        loose.bind("<Configure>", lambda e: self.loose_note.configure(
+            wraplength=max(200, e.width - note_indent - 4)))
+
     def _on_format_change(self, *_args) -> None:
         lossless = self.output_format.get() in _LOSSLESS_FORMATS
         self.quality_menu.configure(state="disabled" if lossless else "normal")
         self.quality_unit.configure(text_color=ui.FAINT if lossless else ui.TEXT_2)
+        loose_ok = self.output_format.get() in _LOOSE_FORMATS
+        self.loose_box.configure(state="normal" if loose_ok else "disabled")
+        self.loose_note.configure(text_color=ui.MUTED if loose_ok else ui.FAINT)
 
     # -- Status card, review panel & activity feed -------------------------
 
@@ -666,6 +696,7 @@ class App:
         folders = list(self.src_folders)
         batch = self.batch = _Batch(
             id=self.batch.id + 1, fmt=self.output_format.get(), bitrate=self.bitrate.get(),
+            fast_loose=bool(self.fast_loose.get()) and self.output_format.get() in _LOOSE_FORMATS,
         )
         self.review_rows = []
         self.approved = {}

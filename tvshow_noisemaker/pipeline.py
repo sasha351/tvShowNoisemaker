@@ -511,6 +511,7 @@ def encode(
                 artwork_path=artwork_path,
                 stream_copy=cfg.stream_copy,
                 mp3_quality=cfg.mp3_quality,
+                fast_loose=cfg.fast_loose,
             )
             return time.monotonic() - started, output_path, _file_size(output_path)
 

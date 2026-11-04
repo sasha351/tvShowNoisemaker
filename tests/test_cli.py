@@ -835,3 +835,8 @@ def test_run_multi_folder_detection_error_is_a_failure(tmp_path):
          patch("tvshow_noisemaker.cli.encode", return_value=Summary()) as enc:
         assert run(args) == 1
     enc.assert_called_once()  # B still encoded
+
+
+def test_parser_fast_loose_flag():
+    assert _parse("-i /in -o /out").fast_loose is None
+    assert _parse("-i /in -o /out --fast-loose").fast_loose is True

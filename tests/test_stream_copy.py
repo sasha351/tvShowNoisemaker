@@ -179,3 +179,63 @@ def test_concat_encode_keeps_full_content_with_read_limit(aac_episode, tmp_path)
     runs = [(f, d) for f, d in _tone_runs(out) if d > 0.1]
     assert [f for f, _ in runs] == [440, 1320]
     assert runs[1][1] == pytest.approx(60.0, abs=0.15)  # content not cut short by -t
+
+
+# ── fast & loose ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("info, fmt, loose, expected", [
+    ({"codec": "mp3", "channels": 2, "bit_rate": 320_000}, "mp3", True, True),
+    ({"codec": "mp3", "channels": 1, "bit_rate": None}, "mp3", True, True),
+    ({"codec": "mp3", "channels": 2, "bit_rate": None}, "mp3", False, False),   # off by default
+    ({"codec": "aac", "channels": 2, "bit_rate": None}, "mp3", True, False),    # aac never goes into mp3
+    ({"codec": "mp3", "channels": 6, "bit_rate": None}, "mp3", True, False),
+    ({"codec": "aac", "channels": 2, "bit_rate": 320_000}, "m4a", True, True),  # bitrate ignored
+    ({"codec": "aac", "channels": 1, "bit_rate": None}, "m4a", True, True),
+    ({"codec": "aac", "channels": 1, "bit_rate": None}, "m4a", False, False),
+])
+def test_can_stream_copy_loose(info, fmt, loose, expected):
+    assert can_stream_copy(info, 256, fmt, loose=loose) is expected
+
+
+def test_mp3_copy_needs_fast_loose(tmp_path):
+    mp3 = {"codec": "mp3", "channels": 2, "bit_rate": None}
+    for loose, copied in ((False, False), (True, True)):
+        with patch("tvshow_noisemaker.processor.probe_audio", return_value=mp3), \
+             patch("tvshow_noisemaker.processor._copy_trim") as copy, \
+             patch("tvshow_noisemaker.processor._run_ffmpeg"):
+            process_file("/in.mkv", str(tmp_path / "a.mp3"), 30.0, 100.0, fast_loose=loose)
+        assert copy.called is copied
+    with patch("tvshow_noisemaker.processor.probe_audio", return_value=mp3), \
+         patch("tvshow_noisemaker.processor._copy_trim") as copy, \
+         patch("tvshow_noisemaker.processor._run_ffmpeg"):
+        process_file("/in.mkv", str(tmp_path / "a.mp3"), 30.0, 100.0, fast_loose=True, stream_copy=False)
+    copy.assert_not_called()  # --no-stream-copy wins
+
+
+@pytest.fixture(scope="module")
+def mp3_episode(aac_episode, tmp_path_factory):
+    path = tmp_path_factory.mktemp("media") / "Show - S01E02 - mp3 audio.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", aac_episode, "-map", "0:v", "-c:v", "copy",
+                    "-map", "0:a", "-c:a", "libmp3lame", "-b:a", "128k", str(path)],
+                   check=True, capture_output=True)
+    return str(path)
+
+
+@needs_ffmpeg
+def test_fast_loose_mp3_copy_keeps_cold_open_art_and_tags(mp3_episode, tmp_path):
+    art = tmp_path / "cover.jpg"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=64x64",
+                    "-frames:v", "1", str(art)], check=True)
+    out = str(tmp_path / "out.mp3")
+    with patch("tvshow_noisemaker.processor._build_concat_cmd") as encode:
+        process_file(mp3_episode, out, intro_start=10.0, intro_end=40.0, outro_start=100.0,
+                     output_format="mp3", fast_loose=True, metadata={"title": "Loose"},
+                     artwork_path=str(art))
+    encode.assert_not_called()  # copied, not encoded
+    runs = [(f, d) for f, d in _tone_runs(out) if d > 0.1]
+    assert [f for f, _ in runs] == [440, 1320]
+    assert runs[0][1] == pytest.approx(10.0, abs=0.15)
+    assert runs[1][1] == pytest.approx(60.0, abs=0.15)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name:format_tags=title",
+                            "-of", "csv=p=0", out], capture_output=True, text=True).stdout.split()
+    assert "mp3" in probe and "mjpeg" in probe and "Loose" in probe

@@ -179,6 +179,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "default is 3). 7 encodes ~1.6x faster than 3.",
     )
     parser.add_argument(
+        "--fast-loose",
+        dest="fast_loose",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Fast & loose: cut mp3 sources into mp3 (and AAC into m4a at any bitrate) without "
+             "re-encoding. Seconds per episode; costs: cuts snap to ~26 ms frames, a cold-open "
+             "join can have a few-ms blip, output keeps the source bitrate.",
+    )
+    parser.add_argument(
         "--no-stream-copy",
         dest="stream_copy",
         action="store_const",
@@ -197,7 +207,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to a JSON config file.  CLI flags take precedence.  "
             "Supports keys: intro_duration, outro_duration, timestamps, "
             "mp3_bitrate, mp3_quality, output_format, silence_db, min_silence_len, "
-            "fingerprint_search_window, cut_margin, stream_copy."
+            "fingerprint_search_window, cut_margin, stream_copy, fast_loose."
         ),
     )
 

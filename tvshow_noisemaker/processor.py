@@ -102,6 +102,7 @@ def process_file(
     artwork_path: Optional[str] = None,
     stream_copy: bool = True,
     mp3_quality: Optional[int] = None,
+    fast_loose: bool = False,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -133,6 +134,10 @@ def process_file(
         For m4a, copy the source audio without re-encoding when it is
         already stereo AAC at or below *mp3_bitrate* (see
         :func:`can_stream_copy`).  Falls back to encoding if the copy fails.
+        ``False`` turns off every copy, *fast_loose* included.
+    fast_loose:
+        "Fast & loose": also stream-copy mp3 sources into mp3, and AAC into m4a at any
+        bitrate or channel count up to stereo.  Ignores *mp3_bitrate* for copied files.
     mp3_quality:
         LAME quality/speed level 0–9 for mp3 (lower is slower and better);
         ``None`` keeps LAME's default (3).
@@ -155,10 +160,13 @@ def process_file(
 
     has_cold_open = intro_start >= _MIN_COLD_OPEN and intro_start < intro_end
 
-    if stream_copy and output_format == "m4a" and can_stream_copy(probe_audio(input_path), mp3_bitrate):
+    copyable = output_format == "m4a" or (fast_loose and output_format == "mp3")
+    if stream_copy and copyable and can_stream_copy(
+        probe_audio(input_path), mp3_bitrate, output_format, loose=fast_loose,
+    ):
         segments = [(0.0, intro_start), (intro_end, outro_start)] if has_cold_open else [(intro_end, outro_start)]
         try:
-            _copy_trim(input_path, output_path, segments, metadata, artwork_path)
+            _copy_trim(input_path, output_path, segments, metadata, artwork_path, output_format)
             logger.info("Written (stream copy): %s", output_path)
             return
         except Terminated:
@@ -238,16 +246,32 @@ def probe_audio(input_path: str) -> Optional[dict]:
         return None
 
 
-def can_stream_copy(info: Optional[dict], target_kbps: int) -> bool:
-    """True when the source audio can go into an m4a unchanged: stereo AAC, not above the target bitrate.
+def can_stream_copy(
+    info: Optional[dict], target_kbps: int, output_format: str = "m4a", loose: bool = False,
+) -> bool:
+    """True when the source audio can go into *output_format* unchanged.
 
-    mkv rarely records a per-stream bitrate; unknown counts as acceptable, since re-encoding a
-    lossy source cannot add quality back anyway.
+    m4a: stereo AAC, not above the target bitrate.  mkv rarely records a per-stream bitrate;
+    unknown counts as acceptable, since re-encoding a lossy source cannot add quality back.
+    *loose* ("fast & loose" mode) also copies mono, any bitrate, and mp3 sources into mp3.
     """
-    if not info or info.get("codec") != "aac" or info.get("channels") != 2:
+    if not info:
         return False
-    bit_rate = info.get("bit_rate")
-    return bit_rate is None or bit_rate <= target_kbps * 1000 * 1.1
+    codec, channels, bit_rate = info.get("codec"), info.get("channels"), info.get("bit_rate")
+    if output_format == "m4a" and codec == "aac":
+        if loose:
+            return channels in (1, 2)
+        return channels == 2 and (bit_rate is None or bit_rate <= target_kbps * 1000 * 1.1)
+    if output_format == "mp3" and codec == "mp3":
+        return loose and channels in (1, 2)
+    return False
+
+
+# Raw container each copied segment is cut into before the join: muxer args, extension.
+_COPY_PART = {
+    "m4a": (["-f", "adts"], ".aac"),
+    "mp3": (["-f", "mp3", "-write_xing", "0", "-id3v2_version", "0"], ".mp3"),
+}
 
 
 def _copy_trim(
@@ -256,22 +280,25 @@ def _copy_trim(
     segments: list,
     metadata: Optional[dict[str, str]],
     artwork_path: Optional[str],
+    output_format: str = "m4a",
 ) -> None:
     """Cut *segments* ``[(start, end), …]`` out of *input_path* without re-encoding and join them.
 
-    Each segment is cut to a temporary ADTS file first: an output-side ``-ss`` drops the cover
-    image, and the concat demuxer's ``inpoint`` lands on a video keyframe, not the cut.
+    Each segment is cut to a temporary raw file first (ADTS for AAC, bare frames for mp3): an
+    output-side ``-ss`` drops the cover image, and the concat demuxer's ``inpoint`` lands on a
+    video keyframe, not the cut.
     """
+    part_args, part_ext = _COPY_PART[output_format]
     tmp_dir = tempfile.mkdtemp(prefix="tvshow-copy-")
     try:
         parts = []
         for i, (start, end) in enumerate(segments):
             coarse = max(0.0, start - _COPY_PREROLL)
-            part = str(Path(tmp_dir) / f"part{i}.aac")
+            part = str(Path(tmp_dir) / f"part{i}{part_ext}")
             _run_ffmpeg([
                 "ffmpeg", "-y", "-ss", str(coarse), "-i", input_path,
                 "-ss", str(start - coarse), "-t", str(end - start),
-                "-map", "0:a:0", "-c:a", "copy", "-f", "adts", part,
+                "-map", "0:a:0", "-c:a", "copy", *part_args, part,
             ], input_path)
             parts.append(part)
         list_path = Path(tmp_dir) / "parts.txt"
@@ -279,11 +306,11 @@ def _copy_trim(
             "ffconcat version 1.0\n" + "".join(f"file '{Path(p).name}'\n" for p in parts),
             encoding="utf-8",
         )
-        art_in, art_out = _build_artwork_args(artwork_path, "m4a")
+        art_in, art_out = _build_artwork_args(artwork_path, output_format)
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
             *art_in, "-map", "0:a:0", "-c:a", "copy", *art_out,
-            *_build_metadata_args(metadata, "m4a"), output_path,
+            *_build_metadata_args(metadata, output_format), output_path,
         ]
         _run_ffmpeg(cmd, input_path)
     finally:
