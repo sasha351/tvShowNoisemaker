@@ -7,6 +7,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="TV Show Noisemaker"
 APP="$HOME/Applications/$APP_NAME.app"
 ICON_SOURCE="$SRC/icons8-convert-144.png"
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/tvshow_noisemaker/__init__.py")"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -34,9 +35,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>com.tvshownoisemaker.gui</string>
     <key>CFBundleVersion</key>
-    <string>2.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>

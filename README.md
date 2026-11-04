@@ -125,9 +125,19 @@ This installs `TV Show Noisemaker.app` to `~/Applications`, visible in Spotlight
 
 #### Automatic updates
 
-Each launch of the app fast-forwards your clone to `origin/main` first, so it always runs the latest version. It never merges or discards anything: when you are on another branch, have uncommitted changes or local commits, or are offline, it launches as is and the footer says `updates paused` (the reason is in the activity feed). If `pyproject.toml` changed, dependencies are reinstalled. Launch with `TVSN_NO_UPDATE=1` to skip the check.
+Each launch of the app updates your clone to the newest release, a `vX.Y.Z` tag on `main`. Commits pushed to `main` without a release are not picked up. It only fast-forwards `main` and never merges or discards anything: when you are on another branch, have uncommitted changes or local commits, or are offline, it launches as is and the footer says `updates paused` (the reason is in the activity feed). If `pyproject.toml` changed, dependencies are reinstalled. Launch with `TVSN_NO_UPDATE=1` to skip the check.
 
-The footer shows the running version as `version · commit · date`, and after an update the activity feed lists what changed. From the terminal: `tvshow-noisemaker --version`. Run `python -m tvshow_noisemaker.updater` to update by hand.
+The footer shows what is running: `2.1.0 · 2026-11-04` on a release, `2.1.0 + 3 · abc1234` when you are past one. After an update the activity feed lists what changed. From the terminal: `tvshow-noisemaker --version`. Run `python -m tvshow_noisemaker.updater` to update by hand.
+
+#### Cutting a release
+
+From an up-to-date, clean `main`:
+
+```bash
+tools/release.sh 2.2.0
+```
+
+It runs the tests, bumps `__version__` (the only place the version lives), commits, tags `v2.2.0` with the commit list as notes, and pushes both. Installed apps pick it up on their next launch.
 
 ## CLI Flags (Most Used)
 

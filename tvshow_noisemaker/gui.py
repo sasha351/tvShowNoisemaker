@@ -402,7 +402,8 @@ class App:
         if result.status == "updated" and not result.seen:
             count = len(result.changes)
             self._activity_append(
-                f"Updated {result.old[:7]} → {result.new[:7]} · {count} {'change' if count == 1 else 'changes'}"
+                f"Updated to {result.tag.lstrip('v') or result.new[:7]} · "
+                f"{count} {'change' if count == 1 else 'changes'}"
             )
             for subject in result.changes[:8]:
                 self._activity_append(f"  {subject}")

@@ -38,24 +38,52 @@ def push(upstream: Path, msg: str, name: str = "a.txt") -> None:
     git(upstream, "push", "-q", "origin", "main")
 
 
-def test_fast_forwards_and_lists_changes(clones):
+def release(upstream: Path, tag: str) -> None:
+    git(upstream, "tag", tag)
+    git(upstream, "push", "-q", "origin", tag)
+
+
+def test_no_releases_yet(clones):
     upstream, local = clones
     push(upstream, "second")
-    push(upstream, "third")
     result = updater.update(local, install_deps=False)
-    assert result.status == "updated"
+    assert (result.status, result.reason) == ("skipped", "no releases yet")
+
+
+def test_updates_to_newest_release_and_lists_changes(clones):
+    upstream, local = clones
+    push(upstream, "second")
+    release(upstream, "v2.9.0")
+    push(upstream, "third")
+    release(upstream, "v2.10.0")  # numeric, not string, order
+    push(upstream, "unreleased")
+    result = updater.update(local, install_deps=False)
+    assert (result.status, result.tag) == ("updated", "v2.10.0")
     assert result.changes == ["third", "second"]
-    assert git(local, "rev-parse", "HEAD") == git(upstream, "rev-parse", "HEAD")
+    assert git(local, "rev-parse", "HEAD") == git(local, "rev-parse", "v2.10.0^{commit}")
+    assert git(local, "rev-parse", "--abbrev-ref", "HEAD") == "main"  # still on the branch, not detached
 
 
-def test_current_when_nothing_new(clones):
-    _, local = clones
+def test_unreleased_commits_on_main_are_ignored(clones):
+    upstream, local = clones
+    release(upstream, "v1.0.0")
+    updater.update(local, install_deps=False)
+    push(upstream, "work in progress")
+    assert updater.update(local, install_deps=False).status == "current"
+
+
+def test_ahead_of_release_counts_as_current(clones):
+    upstream, local = clones
+    release(upstream, "v1.0.0")
+    push(upstream, "later")
+    git(local, "pull", "-q", "origin", "main")
     assert updater.update(local, install_deps=False).status == "current"
 
 
 def test_skips_uncommitted_changes(clones):
     upstream, local = clones
     push(upstream, "second")
+    release(upstream, "v1.0.0")
     (local / "a.txt").write_text("edited")
     result = updater.update(local, install_deps=False)
     assert (result.status, result.reason) == ("skipped", "uncommitted changes")
@@ -71,10 +99,11 @@ def test_skips_other_branch(clones):
 def test_skips_diverged_history(clones):
     upstream, local = clones
     push(upstream, "remote work")
+    release(upstream, "v1.0.0")
     commit(local, "b.txt", "x", "local work")
     before = git(local, "rev-parse", "HEAD")
     result = updater.update(local, install_deps=False)
-    assert (result.status, result.reason) == ("skipped", "local commits not on GitHub")
+    assert (result.status, result.reason) == ("skipped", "local commits not in the release")
     assert git(local, "rev-parse", "HEAD") == before
 
 
@@ -90,8 +119,12 @@ def test_state_round_trip(tmp_path):
     assert updater.load(tmp_path / "missing.json") is None
 
 
-def test_version_label_has_commit(tmp_path, clones):
-    _, local = clones
-    label = updater.version_label(local)
-    assert label.startswith(updater.__version__ + " · ")
+def test_version_label(tmp_path, clones):
+    upstream, local = clones
+    assert updater.version_label(local).startswith(updater.__version__ + " · ")  # no tags yet
+    release(upstream, "v3.1.0")
+    git(local, "fetch", "-q", "--tags", "origin")
+    assert updater.version_label(local).startswith("3.1.0 · 20")  # on the release: version · date
+    commit(local, "b.txt", "x", "local")
+    assert updater.version_label(local).startswith("3.1.0 + 1 · ")  # past it: commits ahead · hash
     assert updater.version_label(tmp_path) == updater.__version__
