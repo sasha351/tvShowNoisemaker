@@ -804,18 +804,25 @@ def test_detect_by_chromaprint_parallel_extraction_deterministic_order():
     lock = threading.Lock()
     active = 0
     max_active = 0
+    # The first calls hold until a second one is inside at the same time: proves overlap without
+    # relying on sleep timing.  Serial extraction never sees overlap and fails after the timeout.
+    overlapped = threading.Event()
 
     def _fake_extract(_fp: str, _start: float, _duration: float):
         nonlocal active, max_active
         with lock:
             active += 1
             max_active = max(max_active, active)
-        time.sleep(0.01)
+            if active > 1:
+                overlapped.set()
+        overlapped.wait(timeout=5)
         with lock:
             active -= 1
         return np.arange(200, dtype=np.uint32), False
 
     with (
+        # Worker count is cpu_count // 2: a 3-core CI runner would get one worker and run serially.
+        patch("tvshow_noisemaker.detector.os.cpu_count", return_value=8),
         patch("tvshow_noisemaker.detector._extract_chromaprint", side_effect=_fake_extract),
         patch(
             "tvshow_noisemaker.detector._compare_episodes_chromaprint",
