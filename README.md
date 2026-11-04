@@ -1,6 +1,6 @@
 # tvShowNoisemaker
 
-Version: 2.4.1
+Version: 2.5.0
 
 `tvshow-noisemaker` trims TV intros/outros from episode video files and exports tagged MP3s.
 
