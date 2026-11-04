@@ -108,7 +108,10 @@ def version_label(repo: Path = REPO) -> str:
     """What is running: ``"2.1.0 · 2026-11-04"`` on a release, ``"2.1.0 + 3 · abc1234"`` past one.
 
     Falls back to the package version (plus the commit, inside a checkout with no release tags).
+    The packaged app has no checkout and must not run git (that can pop up the Xcode installer).
     """
+    if getattr(sys, "frozen", False):
+        return __version__
     try:
         date = _git(repo, "log", "-1", "--format=%cs")
         short = _git(repo, "rev-parse", "--short", "HEAD")

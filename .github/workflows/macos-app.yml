@@ -1,0 +1,90 @@
+name: macOS app
+
+# Pushing a vX.Y.Z tag (tools/release.sh does) builds the app and publishes the GitHub Release
+# the installed apps update from.  Changes to the packaging are build-checked on any branch.
+on:
+  push:
+    tags: ["v*.*.*"]
+    branches: ["**"]
+    paths:
+      - "packaging/**"
+      - "tools/build_macos_app.sh"
+      - ".github/workflows/macos-app.yml"
+      - "pyproject.toml"
+      - "tvshow_noisemaker/appupdate.py"
+      - "tvshow_noisemaker/gui.py"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14        # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel  # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' tvshow_noisemaker/__init__.py)"
+          [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo "::error::tag $GITHUB_REF_NAME but __version__ is $version"; exit 1; }
+
+      - name: Tests
+        run: |
+          python -m pip install --quiet -e ".[dev,stft]"
+          python -m pytest -q
+
+      - name: Build app
+        run: PYTHON=python tools/build_macos_app.sh
+
+      - name: Smoke test the built app
+        run: |
+          report="$RUNNER_TEMP/smoke.txt"
+          TVSN_NO_UPDATE=1 TVSN_SMOKE_REPORT="$report" \
+            "dist/TV Show Noisemaker.app/Contents/MacOS/TV Show Noisemaker" &
+          pid=$!
+          for _ in $(seq 1 60); do [[ -s "$report" ]] && break; sleep 1; done
+          kill "$pid" 2>/dev/null || true
+          cat "$report"
+          if grep -q MISSING "$report"; then exit 1; fi
+          file "dist/TV Show Noisemaker.app/Contents/MacOS/TV Show Noisemaker" | grep -q "${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lh dist
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-from-tag

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,7 +17,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from tvshow_noisemaker import ui, updater
+from tvshow_noisemaker import appupdate, ui, updater
 from tvshow_noisemaker.config import Config
 from tvshow_noisemaker.pipeline import EpisodePlan, Plan, Summary, detect, encode
 from tvshow_noisemaker.processor import terminate_all
@@ -179,7 +180,10 @@ class App:
 
         self.dst.trace_add("write", self._update_start_state)
         self._update_start_state()
-        self._show_update_note()
+        if appupdate.is_bundled():
+            self._check_app_update()
+        else:
+            self._show_update_note()
 
     # The current batch's queues; workers use their own _Batch, never these.
     q = property(lambda self: self.batch.q)
@@ -387,6 +391,13 @@ class App:
             bar, text=updater.version_label(), font=self.font["small"], text_color=ui.MUTED, height=16,
         )
         self.version.pack(side="right", padx=16)
+        # Shown only in the packaged app, once GitHub reports a newer release.
+        self.update_btn = ctk.CTkButton(
+            bar, text="", width=0, height=32, border_width=0, fg_color="transparent",
+            text_color=ui.ACCENT, font=self.font["body"], command=self._install_app_update,
+        )
+        self._release: appupdate.Release | None = None
+        self._updating = False  # downloading an update: Start stays off until it fails
         # Packed above the footer when shown; side="bottom" stacks upward.
         self.details_frame = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
         self.log = ctk.CTkTextbox(
@@ -415,6 +426,75 @@ class App:
         elif result.status in ("skipped", "failed"):
             self.version.configure(text=f"{self.version.cget('text')} · updates paused")
             self._activity_append(f"Not updated from GitHub: {result.reason}")
+
+    # -- App updates (packaged .app only) ---------------------------------
+
+    def _in_background(self, work, done) -> None:
+        """Run *work* on a thread; call ``done(result, error)`` on the Tk thread when it finishes."""
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["result"] = work()
+            except Exception as exc:  # pylint: disable=broad-except
+                box["error"] = exc
+            box["finished"] = True
+
+        def poll() -> None:
+            if box.get("finished"):
+                done(box.get("result"), box.get("error"))
+            else:
+                self.root.after(_POLL_MS * 2, poll)
+
+        threading.Thread(target=run, daemon=True).start()
+        poll()
+
+    def _check_app_update(self) -> None:
+        if os.environ.get("TVSN_NO_UPDATE"):
+            return
+
+        def done(release, error) -> None:
+            if error is not None:
+                self._activity_append(f"Could not check GitHub for updates: {error}")
+            elif release is not None:
+                self._release = release
+                self.update_btn.configure(text=f"Update to {release.version}", state="normal")
+                self.update_btn.pack(side="right", before=self.version)
+
+        self._in_background(appupdate.check, done)
+
+    def _install_app_update(self) -> None:
+        release = self._release
+        if release is None:
+            return
+        if self.running:
+            messagebox.showinfo("Update", "Finish or cancel the current batch, then update.")
+            return
+        if not messagebox.askokcancel(
+            "Update", f"Download {release.version}, then restart TV Show Noisemaker?",
+        ):
+            return
+        self._updating = True
+        self.update_btn.configure(text="Downloading…", state="disabled")
+        self.start_btn.configure(state="disabled")
+        progress = {"f": 0.0}
+
+        def tick() -> None:
+            if self._updating:
+                self.update_btn.configure(text=f"Downloading… {progress['f']:.0%}")
+                self.root.after(250, tick)
+
+        def done(_, error) -> None:
+            if error is None:
+                self._on_close()  # the swap script waits for this process to exit
+                return
+            self._updating = False
+            self.update_btn.configure(text=f"Update to {release.version}", state="normal")
+            self._update_start_state()
+            self._activity_append(f"Update failed: {error}", failed=True)
+
+        tick()
+        self._in_background(lambda: appupdate.install(release, lambda f: progress.update(f=f)), done)
 
     def _toggle_details(self) -> None:
         self._details_shown = not self._details_shown
@@ -558,7 +638,7 @@ class App:
 
     def _update_start_state(self, *_args) -> None:
         if not self.running:
-            ok = bool(self.src_folders) and bool(self.dst.get())
+            ok = bool(self.src_folders) and bool(self.dst.get()) and not self._updating
             self.start_btn.configure(state="normal" if ok else "disabled")
 
     def _enqueue(self, folder: str, plan: Plan) -> None:
@@ -823,12 +903,31 @@ class App:
         self.root.destroy()
 
 
+def _smoke_test(root: ctk.CTk, report: str) -> None:
+    """CI check for the packaged app: the window builds and the bundled tools run, then quit."""
+    lines = [f"version {updater.version_label()}"]
+    for tool, flag in (("ffmpeg", "-version"), ("ffprobe", "-version"), ("fpcalc", "-version")):
+        path = shutil.which(tool)
+        try:
+            out = subprocess.run([path, flag], capture_output=True, text=True, timeout=20).stdout
+            lines.append(f"{tool} {path} :: {out.splitlines()[0] if out else '(no output)'}")
+        except (TypeError, OSError, subprocess.SubprocessError) as exc:
+            lines.append(f"{tool} MISSING ({exc})")
+    Path(report).write_text("\n".join(lines) + "\n")
+    root.destroy()
+
+
 def main() -> None:
+    appupdate.extend_path()
     ctk.set_appearance_mode("system")
     ui.apply_theme()
     root = ctk.CTk()
-    App(root)
+    app = App(root)
+    smoke = os.environ.get("TVSN_SMOKE_REPORT")
+    if smoke:
+        root.after(1500, lambda: _smoke_test(root, smoke))
     root.mainloop()
+    del app
 
 
 if __name__ == "__main__":

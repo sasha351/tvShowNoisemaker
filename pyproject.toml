@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.24.0",
     "static-ffmpeg>=3.0",
     "customtkinter>=5.2",
+    "certifi",
 ]
 
 [project.scripts]
