@@ -9,6 +9,7 @@ Supports a JSON config file with the following optional keys:
             "episode_s01e01.mp4": {"intro_end": 30.0, "outro_start": 2580.0}
         },
         "mp3_bitrate": 256,
+        "mp3_quality": 5,
         "output_format": "mp3",
         "silence_db": -40.0,
         "min_silence_len": 0.5,
@@ -36,6 +37,7 @@ _VALID_KEYS = {
     "outro_duration",
     "timestamps",
     "mp3_bitrate",
+    "mp3_quality",
     "output_format",
     "silence_db",
     "min_silence_len",
@@ -45,6 +47,7 @@ _VALID_KEYS = {
 }
 
 VALID_OUTPUT_FORMATS = {"mp3", "m4a", "flac", "wav"}
+DEFAULT_MP3_QUALITY = 5
 
 
 @dataclass
@@ -56,6 +59,9 @@ class Config:
     # timestamps: mapping of filename (basename) → {"intro_end": float, "outro_start": float}
     timestamps: Dict[str, Dict[str, float]] = field(default_factory=dict)
     mp3_bitrate: int = 256
+    # LAME -q, 0 (slowest, best) … 9 (fastest).  5 is ~1.2x faster than LAME's default 3,
+    # with no audible difference at 256 kbps; 7 is ~1.6x.
+    mp3_quality: int = DEFAULT_MP3_QUALITY
     output_format: str = "mp3"
     silence_db: float = -40.0
     min_silence_len: float = 0.5
@@ -114,6 +120,12 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
         if not isinstance(val, int) or val <= 0:
             raise ValueError(f"Config key 'mp3_bitrate' must be a positive integer, got {val!r}")
         validated["mp3_bitrate"] = val
+
+    if "mp3_quality" in raw:
+        val = raw["mp3_quality"]
+        if isinstance(val, bool) or not isinstance(val, int) or not 0 <= val <= 9:
+            raise ValueError(f"Config key 'mp3_quality' must be an integer 0-9, got {val!r}")
+        validated["mp3_quality"] = val
 
     if "output_format" in raw:
         val = raw["output_format"]
@@ -174,6 +186,9 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
     intro_duration = _pick(getattr(args, "intro_duration", None), "intro_duration", None)
     outro_duration = _pick(getattr(args, "outro_duration", None), "outro_duration", None)
     mp3_bitrate = _pick(getattr(args, "mp3_bitrate", None), "mp3_bitrate", 256)
+    mp3_quality = int(_pick(getattr(args, "mp3_quality", None), "mp3_quality", DEFAULT_MP3_QUALITY))
+    if not 0 <= mp3_quality <= 9:
+        raise ValueError("mp3_quality must be 0-9")
     output_format = _pick(getattr(args, "output_format", None), "output_format", "mp3")
     silence_db = _pick(getattr(args, "silence_db", None), "silence_db", -40.0)
     min_silence_len = _pick(getattr(args, "min_silence_len", None), "min_silence_len", 0.5)
@@ -197,6 +212,7 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         outro_duration=outro_duration,
         timestamps=timestamps,
         mp3_bitrate=int(mp3_bitrate),
+        mp3_quality=mp3_quality,
         output_format=output_format,
         silence_db=float(silence_db),
         min_silence_len=float(min_silence_len),

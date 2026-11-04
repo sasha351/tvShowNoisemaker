@@ -739,3 +739,12 @@ def test_run_from_plan_skips_detection(tmp_path):
     mock_dur.assert_not_called()
     mock_res.assert_not_called()
     assert mock_proc.call_args.kwargs["intro_end"] == 42.0
+
+
+def test_parser_mp3_quality_and_stream_copy_flags():
+    args = _parse("--input-dir /in --output-dir /out")
+    assert args.mp3_quality is None and args.stream_copy is None  # defaults live in build_config
+    args = _parse("--input-dir /in --output-dir /out --mp3-quality 7 --no-stream-copy")
+    assert args.mp3_quality == 7 and args.stream_copy is False
+    with pytest.raises(SystemExit):
+        _parse("--input-dir /in --output-dir /out --mp3-quality 10")

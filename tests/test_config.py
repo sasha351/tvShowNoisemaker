@@ -207,3 +207,14 @@ def test_stream_copy_defaults_on_and_file_or_cli_turns_it_off(tmp_path):
     cfg_file.write_text(json.dumps({"stream_copy": "no"}))
     with pytest.raises(ValueError, match="stream_copy"):
         load_config(str(cfg_file))
+
+
+def test_mp3_quality_default_file_and_cli(tmp_path):
+    assert build_config(_FakeArgs(), {}).mp3_quality == 5
+    assert build_config(_FakeArgs(), {"mp3_quality": 7}).mp3_quality == 7
+    assert build_config(_FakeArgs(mp3_quality=2), {"mp3_quality": 7}).mp3_quality == 2
+    for bad in (10, -1, "5", True):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"mp3_quality": bad}))
+        with pytest.raises(ValueError, match="mp3_quality"):
+            load_config(str(cfg_file))

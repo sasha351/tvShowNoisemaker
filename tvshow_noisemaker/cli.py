@@ -161,6 +161,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--mp3-quality",
+        dest="mp3_quality",
+        type=int,
+        choices=range(10),
+        default=None,
+        metavar="0-9",
+        help="LAME quality/speed for mp3: 0 slowest/best … 9 fastest (default: 5; LAME's own "
+             "default is 3). 7 encodes ~1.6x faster than 3.",
+    )
+    parser.add_argument(
         "--no-stream-copy",
         dest="stream_copy",
         action="store_const",
@@ -178,7 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to a JSON config file.  CLI flags take precedence.  "
             "Supports keys: intro_duration, outro_duration, timestamps, "
-            "mp3_bitrate, output_format, silence_db, min_silence_len, "
+            "mp3_bitrate, mp3_quality, output_format, silence_db, min_silence_len, "
             "fingerprint_search_window, cut_margin, stream_copy."
         ),
     )

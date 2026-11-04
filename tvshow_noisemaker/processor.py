@@ -74,13 +74,16 @@ def _aac_encoder() -> str:
     return "aac_at" if " aac_at " in result.stdout else "aac"
 
 
-def _codec_args(output_format: str, mp3_bitrate: int) -> list[str]:
+def _codec_args(output_format: str, mp3_bitrate: int, mp3_quality: Optional[int] = None) -> list[str]:
     _, codec_args, uses_bitrate = _FORMATS[output_format]
     args = list(codec_args)
     if output_format == "m4a":
         args = ["-acodec", _aac_encoder()]
     if uses_bitrate:
         args.extend(["-ab", f"{mp3_bitrate}k"])
+    if output_format == "mp3" and mp3_quality is not None:
+        # LAME's -q: 0 slowest/best … 9 fastest.  None keeps LAME's own default (3).
+        args.extend(["-compression_level", str(mp3_quality)])
     return args
 
 
@@ -95,6 +98,7 @@ def process_file(
     metadata: Optional[dict[str, str]] = None,
     artwork_path: Optional[str] = None,
     stream_copy: bool = True,
+    mp3_quality: Optional[int] = None,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -126,6 +130,9 @@ def process_file(
         For m4a, copy the source audio without re-encoding when it is
         already stereo AAC at or below *mp3_bitrate* (see
         :func:`can_stream_copy`).  Falls back to encoding if the copy fails.
+    mp3_quality:
+        LAME quality/speed level 0–9 for mp3 (lower is slower and better);
+        ``None`` keeps LAME's default (3).
 
     Raises
     ------
@@ -160,13 +167,13 @@ def process_file(
         cmd = _build_concat_cmd(
             input_path, output_path,
             intro_start, intro_end, outro_start,
-            mp3_bitrate, output_format, metadata, artwork_path,
+            mp3_bitrate, output_format, metadata, artwork_path, mp3_quality,
         )
     else:
         cmd = _build_simple_cmd(
             input_path, output_path,
             intro_end, outro_start,
-            mp3_bitrate, output_format, metadata, artwork_path,
+            mp3_bitrate, output_format, metadata, artwork_path, mp3_quality,
         )
 
     _run_ffmpeg(cmd, input_path)
@@ -289,6 +296,7 @@ def _build_simple_cmd(
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
     artwork_path: Optional[str] = None,
+    mp3_quality: Optional[int] = None,
 ) -> list:
     """Build an ffmpeg command that seeks past the intro and encodes to outro_start."""
     duration = outro_start - intro_end
@@ -301,7 +309,7 @@ def _build_simple_cmd(
         "-i", input_path,
         *art_in,
         "-map", "0:a:0",
-        *_codec_args(output_format, mp3_bitrate),
+        *_codec_args(output_format, mp3_bitrate, mp3_quality),
         "-ac", "2",
         *art_out,
     ]
@@ -320,6 +328,7 @@ def _build_concat_cmd(
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
     artwork_path: Optional[str] = None,
+    mp3_quality: Optional[int] = None,
 ) -> list:
     """Build an ffmpeg command that keeps [0..intro_start] + [intro_end..outro_start]."""
     filter_complex = (
@@ -335,7 +344,7 @@ def _build_concat_cmd(
         *art_in,
         "-filter_complex", filter_complex,
         "-map", "[out]",
-        *_codec_args(output_format, mp3_bitrate),
+        *_codec_args(output_format, mp3_bitrate, mp3_quality),
         "-ac", "2",
         *art_out,
     ]

@@ -198,6 +198,7 @@ To build locally, run `tools/build_macos_app.sh` on a Mac, or `tools/build_windo
 | `--format` | mp3 | Output audio format (`mp3`, `m4a`, `flac`, `wav`) |
 | `--workers`, `-w` | half CPU count | Parallel encode workers |
 | `--mp3-bitrate` | 256 | MP3 bitrate (kbps) |
+| `--mp3-quality 0-9` | 5 | LAME quality/speed: 0 slowest/best … 9 fastest. 5 is ~1.2x faster than LAME's default 3, 7 is ~1.6x |
 | `--no-stream-copy` | off | m4a: always re-encode, even when the source is already stereo AAC |
 | `--fingerprint` / `--no-fingerprint` | on | Enable/disable fingerprinting |
 | `--fingerprint-search-window` | 300 | Search window from start/end |
@@ -217,6 +218,7 @@ Example:
 ```json
 {
     "mp3_bitrate": 256,
+    "mp3_quality": 5,
     "intro_duration": 90.0,
     "outro_duration": 30.0,
     "silence_db": -40.0,

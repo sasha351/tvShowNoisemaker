@@ -440,3 +440,19 @@ def test_process_file_kills_on_timeout(tmp_path):
             process_file("/input/ep01.mp4", str(tmp_path / "ep01.mp3"), 30.0, 2550.0)
     proc.kill.assert_called_once()
     assert proc not in _live_ffmpeg
+
+
+def test_codec_args_mp3_quality_only_for_mp3():
+    assert _codec_args("mp3", 256, 5) == ["-acodec", "libmp3lame", "-ab", "256k", "-compression_level", "5"]
+    assert _codec_args("flac", 256, 5) == ["-acodec", "flac"]
+    assert _codec_args("mp3", 256) == ["-acodec", "libmp3lame", "-ab", "256k"]  # LAME's own default
+
+
+def test_process_file_passes_mp3_quality(tmp_path):
+    with patch("tvshow_noisemaker.processor.subprocess.Popen") as popen:
+        proc = MagicMock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        popen.return_value = proc
+        process_file("/in.mkv", str(tmp_path / "a.mp3"), 30.0, 100.0, intro_start=5.0, mp3_quality=7)
+    cmd = popen.call_args[0][0]
+    assert cmd[cmd.index("-compression_level") + 1] == "7"
