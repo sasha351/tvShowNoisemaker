@@ -74,7 +74,7 @@ def _make_args(
 
 def test_parser_required_args():
     args = _parse("--input-dir /in --output-dir /out")
-    assert args.input_dir == "/in"
+    assert args.input_dir == ["/in"]
     assert args.output_dir == "/out"
 
 
@@ -748,3 +748,90 @@ def test_parser_mp3_quality_and_stream_copy_flags():
     assert args.mp3_quality == 7 and args.stream_copy is False
     with pytest.raises(SystemExit):
         _parse("--input-dir /in --output-dir /out --mp3-quality 10")
+
+
+# ---------------------------------------------------------------------------
+# Several --input-dir folders
+# ---------------------------------------------------------------------------
+
+
+def test_parser_repeated_input_dir():
+    assert _parse("-i /a -i /b -o /out").input_dir == ["/a", "/b"]
+
+
+def test_output_dirs_for():
+    from tvshow_noisemaker.cli import output_dirs_for
+    assert output_dirs_for(["/tv/Show/S01"], "/out") == ["/out"]
+    assert output_dirs_for(["/tv/Show/S01", "/tv/Show/S02"], "/out") == ["/out/S01", "/out/S02"]
+    assert output_dirs_for(["/tv/A/Season 01", "/tv/B/Season 01"], "/out") == [
+        "/out/A - Season 01", "/out/B - Season 01",
+    ]
+
+
+def _folder_with_episode(root, name):
+    d = root / name
+    d.mkdir()
+    (d / "ep01.mp4").touch()
+    return str(d)
+
+
+def test_run_multi_folder_detects_next_while_encoding(tmp_path):
+    """Folder B's detection must start while folder A is still encoding."""
+    import threading
+    from tvshow_noisemaker.pipeline import EpisodePlan, Plan, Summary
+
+    a = _folder_with_episode(tmp_path, "S01")
+    b = _folder_with_episode(tmp_path, "S02")
+    b_detecting = threading.Event()
+    calls = []
+
+    def fake_detect(input_dir, cfg):
+        if input_dir == b:
+            b_detecting.set()
+        return Plan(input_dir=input_dir, episodes=[EpisodePlan(
+            path=str(Path(input_dir) / "ep01.mp4"), duration=100.0,
+            intro_start=0.0, intro_end=10.0, outro_start=90.0, confidence="high",
+        )], stage_timings={"probe": 1.0, "fingerprint": 2.0})
+
+    def fake_encode(plan, cfg, output_dir, progress=None):
+        if plan.input_dir == a:
+            overlapped = b_detecting.wait(timeout=5)
+        else:
+            overlapped = None
+        calls.append((plan.input_dir, output_dir, cfg.workers, overlapped))
+        return Summary(converted=["ep01.mp4"])
+
+    args = _make_args(input_dir=[a, b], output_dir=str(tmp_path / "out"))
+    with patch("tvshow_noisemaker.cli.detect", side_effect=fake_detect), \
+         patch("tvshow_noisemaker.cli.encode", side_effect=fake_encode):
+        assert run(args) == 0
+
+    assert [c[0] for c in calls] == [a, b]
+    assert calls[0][1] == str(tmp_path / "out" / "S01")
+    assert calls[1][1] == str(tmp_path / "out" / "S02")
+    assert calls[0][3] is True  # B was being detected while A encoded
+    assert calls[1][2] is None  # detection finished: the last folder gets every core
+
+
+def test_run_multi_folder_rejects_plan_and_detect_only(tmp_path):
+    a = _folder_with_episode(tmp_path, "S01")
+    b = _folder_with_episode(tmp_path, "S02")
+    args = _make_args(input_dir=[a, b], output_dir=str(tmp_path / "out"), detect_only=str(tmp_path / "p.json"))
+    assert run(args) == 1
+
+
+def test_run_multi_folder_detection_error_is_a_failure(tmp_path):
+    from tvshow_noisemaker.pipeline import Plan, Summary
+    a = _folder_with_episode(tmp_path, "S01")
+    b = _folder_with_episode(tmp_path, "S02")
+
+    def fake_detect(input_dir, cfg):
+        if input_dir == a:
+            raise RuntimeError("disk gone")
+        return Plan(input_dir=input_dir)
+
+    args = _make_args(input_dir=[a, b], output_dir=str(tmp_path / "out"))
+    with patch("tvshow_noisemaker.cli.detect", side_effect=fake_detect), \
+         patch("tvshow_noisemaker.cli.encode", return_value=Summary()) as enc:
+        assert run(args) == 1
+    enc.assert_called_once()  # B still encoded

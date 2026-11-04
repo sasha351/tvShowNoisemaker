@@ -142,6 +142,10 @@ tvshow-noisemaker -i ./eps -o ./out --no-fingerprint
 # fallback durations
 tvshow-noisemaker -i ./eps -o ./out --intro-duration 90 --outro-duration 30
 
+# several seasons in one run: S02 is detected while S01 encodes,
+# output lands in ./out/Season 01 and ./out/Season 02
+tvshow-noisemaker -i "./Show/Season 01" -i "./Show/Season 02" -o ./out
+
 # custom bitrate, workers, and benchmark stats
 tvshow-noisemaker -i ./eps -o ./out --mp3-bitrate 320 --workers 8 --benchmark-fingerprint
 ```
@@ -192,7 +196,7 @@ To build locally, run `tools/build_macos_app.sh` on a Mac, or `tools/build_windo
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--input-dir`, `-i` | required | Input video directory |
+| `--input-dir`, `-i` | required | Input video directory. Repeat for several seasons; each gets `<output-dir>/<folder name>` |
 | `--output-dir`, `-o` | required | Output MP3 directory |
 | `--config`, `-c` | none | JSON config file |
 | `--format` | mp3 | Output audio format (`mp3`, `m4a`, `flac`, `wav`) |

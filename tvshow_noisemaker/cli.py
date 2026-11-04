@@ -17,11 +17,15 @@ Detection strategy (in priority order)
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import logging
+import os
+import queue
 import re
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -30,6 +34,7 @@ from tvshow_noisemaker.updater import version_label
 from tvshow_noisemaker.config import VALID_OUTPUT_FORMATS, build_config, load_config
 from tvshow_noisemaker.pipeline import (
     Plan,
+    Summary,
     detect,
     encode,
     encode_workers,
@@ -119,8 +124,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input-dir", "-i",
         required=True,
+        action="append",
         metavar="DIR",
-        help="Directory containing video episode files (mp4, mkv, avi, mov, etc.).",
+        help="Directory containing video episode files (mp4, mkv, avi, mov, etc.). Repeat for "
+             "several seasons (-i S01 -i S02): each goes to <output-dir>/<folder name>, and the "
+             "next one is detected while the current one encodes.",
     )
     parser.add_argument(
         "--output-dir", "-o",
@@ -326,16 +334,102 @@ def _ensure_ffmpeg_on_path(log: logging.Logger) -> bool:
     return False
 
 
+def output_dirs_for(input_dirs: list, output_dir: str) -> list:
+    """One input writes straight into *output_dir*; several get ``<output_dir>/<folder name>`` each.
+
+    Folders sharing a name (two shows' ``Season 01``) are told apart by their parent folder.
+    """
+    if len(input_dirs) == 1:
+        return [output_dir]
+    names = [Path(d).name for d in input_dirs]
+    out = []
+    for d, name in zip(input_dirs, names):
+        if names.count(name) > 1:
+            name = f"{Path(d).parent.name} - {name}"
+        while name in out:  # ponytail: same parent and name twice; just number it
+            name += "_"
+        out.append(name)
+    return [str(Path(output_dir) / name) for name in out]
+
+
+def _detect_folder(con, app_log, args, cfg, input_dir: Path) -> Optional[Plan]:
+    """Detect one folder, logging what the user needs to know; ``None`` when it has no videos."""
+    video_files = list_video_files(str(input_dir))
+    if not video_files:
+        con.warning("No video files found in %s", input_dir)
+        return None
+    con.info("Found %d video file(s) in %s", len(video_files), input_dir)
+    if cfg.use_fingerprinting and len(video_files) >= 2:
+        con.info("Running audio fingerprinting across %d episodes…", len(video_files))
+    plan = detect(str(input_dir), cfg)
+    n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
+    if n_review:
+        con.warning(
+            "%d episode(s) flagged for review; those without complete boundaries are skipped "
+            "(reasons in the log file)", n_review,
+        )
+    if cfg.use_fingerprinting and len(video_files) >= 2 and not plan.fingerprint_stats:
+        con.warning(
+            "Fingerprinting failed – fell back to silence detection "
+            "(results may be less accurate); see the log file"
+        )
+    if getattr(args, "benchmark_fingerprint", False) and plan.fingerprint_stats:
+        fp_stats = plan.fingerprint_stats
+        con.info(
+            "Fingerprint benchmark: %.2fs, candidates=%d, jobs=%d, "
+            "valid=%d, workers=%d, cache_hits=%d, cache_misses=%d",
+            fp_stats.get("elapsed_sec", 0.0),
+            int(fp_stats.get("candidate_files", 0)),
+            int(fp_stats.get("jobs_submitted", 0)),
+            int(fp_stats.get("valid_files", 0)),
+            int(fp_stats.get("workers", 0)),
+            int(fp_stats.get("cache_hits", 0)),
+            int(fp_stats.get("cache_misses", 0)),
+        )
+        app_log.info("Fingerprint benchmark stats: %s", fp_stats)
+    return plan
+
+
+def _encode_folder(con, cfg, plan: Plan, output_dir: str) -> Summary:
+    jobs = plan.to_encode
+    batch_start = time.monotonic()
+    con.info(
+        "Starting conversion  (%d files, %d to encode, %d workers, output → %s)",
+        len(plan.episodes), len(jobs), encode_workers(cfg, len(jobs)), output_dir,
+    )
+
+    def _progress(stage: str, done: int, total: int, _message: str) -> None:
+        if stage == "encode":
+            _print_progress_bar(done, total, batch_start)
+
+    summary = encode(plan, cfg, output_dir, progress=_progress)
+    # Finish progress line before summary logging
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return summary
+
+
+def _merge(total: Summary, part: Summary) -> None:
+    total.converted += part.converted
+    total.skipped += part.skipped
+    total.failed += part.failed
+    total.content_secs += part.content_secs
+    total.trimmed_secs += part.trimmed_secs
+    total.output_bytes += part.output_bytes
+    total.encode_sec += part.encode_sec
+
+
 def run(args: argparse.Namespace) -> int:
     """Main processing logic.  Returns an exit code (0 = success)."""
     run_start = time.monotonic()
+    input_dirs = args.input_dir if isinstance(args.input_dir, list) else [args.input_dir]
 
     # Create output dir early so we can write the log file there
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     con, app_log, log_path = _setup_logging(
-        args.input_dir, args.output_dir, args.log_file, getattr(args, "verbose", False),
+        input_dirs[0], args.output_dir, args.log_file, getattr(args, "verbose", False),
     )
 
     if not _ensure_ffmpeg_on_path(con):
@@ -348,94 +442,94 @@ def run(args: argparse.Namespace) -> int:
         return 1
     cfg = build_config(args, file_data)
 
-    input_dir = Path(args.input_dir)
-    if not input_dir.is_dir():
-        con.error("input-dir does not exist or is not a directory: %s", input_dir)
+    for d in input_dirs:
+        if not Path(d).is_dir():
+            con.error("input-dir does not exist or is not a directory: %s", Path(d))
+            return 1
+
+    plan_file = getattr(args, "plan", None)
+    detect_only = getattr(args, "detect_only", None)
+    if len(input_dirs) > 1 and (plan_file or detect_only):
+        con.error("--plan and --detect-only take a single --input-dir")
         return 1
 
-    # ── Detect (or load a saved plan) ──────────────────────────────
-    plan_file = getattr(args, "plan", None)
-    if plan_file:
-        try:
-            plan = Plan.load(plan_file)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            con.error("Could not load plan %s: %s", plan_file, exc)
-            return 1
-        con.info("Loaded plan for %d episode(s) from %s", len(plan.episodes), plan_file)
-    else:
-        video_files = list_video_files(str(input_dir))
-        if not video_files:
-            con.warning("No video files found in %s", input_dir)
-            return 0
-        con.info("Found %d video file(s) in %s", len(video_files), input_dir)
-        if cfg.use_fingerprinting and len(video_files) >= 2:
-            con.info("Running audio fingerprinting across %d episodes…", len(video_files))
-        plan = detect(str(input_dir), cfg)
-        n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
-        if n_review:
-            con.warning(
-                "%d episode(s) flagged for review; those without complete boundaries are skipped "
-                "(reasons in the log file)", n_review,
-            )
-        if cfg.use_fingerprinting and len(video_files) >= 2 and not plan.fingerprint_stats:
-            con.warning(
-                "Fingerprinting failed – fell back to silence detection "
-                "(results may be less accurate); see the log file"
-            )
-        if getattr(args, "benchmark_fingerprint", False) and plan.fingerprint_stats:
-            fp_stats = plan.fingerprint_stats
-            con.info(
-                "Fingerprint benchmark: %.2fs, candidates=%d, jobs=%d, "
-                "valid=%d, workers=%d, cache_hits=%d, cache_misses=%d",
-                fp_stats.get("elapsed_sec", 0.0),
-                int(fp_stats.get("candidate_files", 0)),
-                int(fp_stats.get("jobs_submitted", 0)),
-                int(fp_stats.get("valid_files", 0)),
-                int(fp_stats.get("workers", 0)),
-                int(fp_stats.get("cache_hits", 0)),
-                int(fp_stats.get("cache_misses", 0)),
-            )
-            app_log.info("Fingerprint benchmark stats: %s", fp_stats)
-
-    detect_only = getattr(args, "detect_only", None)
-    if detect_only:
-        plan.save(detect_only)
-        n_skip = sum(1 for ep in plan.episodes if ep.confidence == "skip")
-        n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
-        con.info(
-            "Plan written to %s (%d episodes, %d to encode, %d for review, %d skipped)",
-            detect_only, len(plan.episodes), len(plan.to_encode), n_review, n_skip,
-        )
-        return 0
-
-    # ── Encode ───────────────────────────────────────────────────────
-    total_count = len(plan.episodes)
-    jobs = plan.to_encode
+    # ── Detect (or load a saved plan) and encode ────────────────────
+    out_dirs = output_dirs_for(input_dirs, str(output_dir))
+    timings: dict = {}
+    summary = Summary()
+    total_count = 0
     batch_start = time.monotonic()
-    con.info(
-        "Starting conversion  (%d files, %d to encode, %d workers, output → %s)",
-        total_count, len(jobs), encode_workers(cfg, len(jobs)), output_dir,
-    )
 
-    def _progress(stage: str, done: int, total: int, _message: str) -> None:
-        if stage == "encode":
-            _print_progress_bar(done, total, batch_start)
+    if len(input_dirs) == 1:
+        if plan_file:
+            try:
+                plan = Plan.load(plan_file)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                con.error("Could not load plan %s: %s", plan_file, exc)
+                return 1
+            con.info("Loaded plan for %d episode(s) from %s", len(plan.episodes), plan_file)
+        else:
+            plan = _detect_folder(con, app_log, args, cfg, Path(input_dirs[0]))
+            if plan is None:
+                return 0
 
-    summary = encode(plan, cfg, str(output_dir), progress=_progress)
+        if detect_only:
+            plan.save(detect_only)
+            n_skip = sum(1 for ep in plan.episodes if ep.confidence == "skip")
+            n_review = sum(1 for ep in plan.episodes if ep.confidence == "review")
+            con.info(
+                "Plan written to %s (%d episodes, %d to encode, %d for review, %d skipped)",
+                detect_only, len(plan.episodes), len(plan.to_encode), n_review, n_skip,
+            )
+            return 0
 
-    # Finish progress line before summary logging
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+        total_count = len(plan.episodes)
+        timings = dict(plan.stage_timings)
+        batch_start = time.monotonic()
+        _merge(summary, _encode_folder(con, cfg, plan, out_dirs[0]))
+    else:
+        # Season N+1 is detected on a background thread while season N encodes, as in the GUI.
+        con.info("Processing %d folders; each one's output goes to its own subfolder", len(input_dirs))
+        plans: "queue.Queue" = queue.Queue()
+        detect_done = threading.Event()
+
+        def _detector() -> None:
+            for d, out_sub in zip(input_dirs, out_dirs):
+                try:
+                    plans.put((d, out_sub, _detect_folder(con, app_log, args, cfg, Path(d)), None))
+                except Exception as exc:  # pylint: disable=broad-except
+                    plans.put((d, out_sub, None, str(exc)))
+            detect_done.set()
+            plans.put(None)
+
+        threading.Thread(target=_detector, name="detect", daemon=True).start()
+        cpu = os.cpu_count() or 2
+        while (item := plans.get()) is not None:
+            folder, out_sub, plan, error = item
+            if error is not None:
+                con.error("  ✗ Failed – %s: detection error: %s", Path(folder).name, error)
+                summary.failed.append((Path(folder).name, f"Detection error: {error}"))
+                continue
+            if plan is None:
+                continue
+            total_count += len(plan.episodes)
+            for stage, secs in plan.stage_timings.items():
+                timings[stage] = timings.get(stage, 0.0) + secs
+            # Leave cores for detection while it still runs; take them all for the last folder.
+            workers = cfg.workers or (None if detect_done.is_set() else max(1, cpu - cpu // 2))
+            con.info("── %s", Path(folder).name)
+            _merge(summary, _encode_folder(con, dataclasses.replace(cfg, workers=workers), plan, out_sub))
 
     # ── Summary (printed to both terminal and log file) ──────
     batch_elapsed = time.monotonic() - batch_start
     total_elapsed = time.monotonic() - run_start
     rate = (total_count / total_elapsed) if total_elapsed > 0 else 0.0
-    timings = plan.stage_timings
     con.info("")
     con.info("═" * 60)
     con.info("  SUMMARY")
     con.info("═" * 60)
+    if len(input_dirs) > 1:
+        con.info("  Folders             : %d", len(input_dirs))
     con.info("  Total files found   : %d", total_count)
     con.info("  Converted           : %d", len(summary.converted))
     con.info("  Skipped             : %d", len(summary.skipped))
