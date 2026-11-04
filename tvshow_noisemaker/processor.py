@@ -10,8 +10,11 @@ Uses ``ffmpeg`` (via ``subprocess``) to either:
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -20,13 +23,19 @@ logger = logging.getLogger(__name__)
 
 # Live ffmpeg encodes, so a GUI cancel can terminate them instead of waiting up to 10 minutes.
 _live_ffmpeg: set = set()
+_terminated: set = set()  # live ffmpegs terminate_all() killed: their failure must not trigger a fallback
 _live_lock = threading.Lock()
+
+
+class Terminated(RuntimeError):
+    """ffmpeg was stopped by :func:`terminate_all` (a cancel), not by a real failure."""
 
 
 def terminate_all() -> int:
     """Terminate every ffmpeg started by :func:`process_file` that is still running."""
     with _live_lock:
         procs = list(_live_ffmpeg)
+        _terminated.update(procs)
     for proc in procs:
         try:
             proc.terminate()
@@ -37,6 +46,10 @@ def terminate_all() -> int:
 
 # Minimum pre-intro content (seconds) to bother preserving via concat.
 _MIN_COLD_OPEN = 1.0
+
+# Stream copy: the input seek lands on a keyframe at or before ``cut - _COPY_PREROLL``; an
+# output-side seek then drops whole packets up to the exact cut (one AAC frame, ~21 ms).
+_COPY_PREROLL = 10.0
 
 # format name -> (extension, codec args, uses_bitrate)
 _FORMATS = {
@@ -81,6 +94,7 @@ def process_file(
     output_format: str = "mp3",
     metadata: Optional[dict[str, str]] = None,
     artwork_path: Optional[str] = None,
+    stream_copy: bool = True,
 ) -> None:
     """Trim *input_path* and write an MP3 to *output_path*.
 
@@ -108,6 +122,10 @@ def process_file(
     artwork_path:
         Optional path to a cover image to embed.  Ignored for wav output,
         whose muxer rejects video streams.
+    stream_copy:
+        For m4a, copy the source audio without re-encoding when it is
+        already stereo AAC at or below *mp3_bitrate* (see
+        :func:`can_stream_copy`).  Falls back to encoding if the copy fails.
 
     Raises
     ------
@@ -127,6 +145,17 @@ def process_file(
 
     has_cold_open = intro_start >= _MIN_COLD_OPEN and intro_start < intro_end
 
+    if stream_copy and output_format == "m4a" and can_stream_copy(probe_audio(input_path), mp3_bitrate):
+        segments = [(0.0, intro_start), (intro_end, outro_start)] if has_cold_open else [(intro_end, outro_start)]
+        try:
+            _copy_trim(input_path, output_path, segments, metadata, artwork_path)
+            logger.info("Written (stream copy): %s", output_path)
+            return
+        except Terminated:
+            raise
+        except RuntimeError as exc:
+            logger.warning("Stream copy failed for %s, re-encoding instead: %s", input_path, exc)
+
     if has_cold_open:
         cmd = _build_concat_cmd(
             input_path, output_path,
@@ -140,6 +169,12 @@ def process_file(
             mp3_bitrate, output_format, metadata, artwork_path,
         )
 
+    _run_ffmpeg(cmd, input_path)
+    logger.info("Written: %s", output_path)
+
+
+def _run_ffmpeg(cmd: list, input_path: str) -> None:
+    """Run one ffmpeg command, tracked for :func:`terminate_all`; raise ``RuntimeError`` on failure."""
     logger.debug("ffmpeg cmd: %s", " ".join(cmd))
 
     try:
@@ -160,14 +195,89 @@ def process_file(
     finally:
         with _live_lock:
             _live_ffmpeg.discard(proc)
+            killed = proc in _terminated
+            _terminated.discard(proc)
 
+    if killed:
+        raise Terminated(f"ffmpeg was cancelled for {input_path}")
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg failed for {input_path} (exit {proc.returncode}):\n"
             f"{(stderr or '')[-2000:]}"
         )
 
-    logger.info("Written: %s", output_path)
+
+def probe_audio(input_path: str) -> Optional[dict]:
+    """``{"codec": str, "channels": int, "bit_rate": int | None}`` for the first audio stream, or ``None``."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name,channels,bit_rate", "-of", "json", input_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        stream = json.loads(result.stdout)["streams"][0]
+        bit_rate = stream.get("bit_rate")
+        return {
+            "codec": stream.get("codec_name"),
+            "channels": int(stream.get("channels") or 0),
+            "bit_rate": int(bit_rate) if bit_rate and str(bit_rate).isdigit() else None,
+        }
+    except Exception:  # pylint: disable=broad-except
+        return None
+
+
+def can_stream_copy(info: Optional[dict], target_kbps: int) -> bool:
+    """True when the source audio can go into an m4a unchanged: stereo AAC, not above the target bitrate.
+
+    mkv rarely records a per-stream bitrate; unknown counts as acceptable, since re-encoding a
+    lossy source cannot add quality back anyway.
+    """
+    if not info or info.get("codec") != "aac" or info.get("channels") != 2:
+        return False
+    bit_rate = info.get("bit_rate")
+    return bit_rate is None or bit_rate <= target_kbps * 1000 * 1.1
+
+
+def _copy_trim(
+    input_path: str,
+    output_path: str,
+    segments: list,
+    metadata: Optional[dict[str, str]],
+    artwork_path: Optional[str],
+) -> None:
+    """Cut *segments* ``[(start, end), …]`` out of *input_path* without re-encoding and join them.
+
+    Each segment is cut to a temporary ADTS file first: an output-side ``-ss`` drops the cover
+    image, and the concat demuxer's ``inpoint`` lands on a video keyframe, not the cut.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="tvshow-copy-")
+    try:
+        parts = []
+        for i, (start, end) in enumerate(segments):
+            coarse = max(0.0, start - _COPY_PREROLL)
+            part = str(Path(tmp_dir) / f"part{i}.aac")
+            _run_ffmpeg([
+                "ffmpeg", "-y", "-ss", str(coarse), "-i", input_path,
+                "-ss", str(start - coarse), "-t", str(end - start),
+                "-map", "0:a:0", "-c:a", "copy", "-f", "adts", part,
+            ], input_path)
+            parts.append(part)
+        list_path = Path(tmp_dir) / "parts.txt"
+        list_path.write_text(
+            "ffconcat version 1.0\n" + "".join(f"file '{Path(p).name}'\n" for p in parts),
+            encoding="utf-8",
+        )
+        art_in, art_out = _build_artwork_args(artwork_path, "m4a")
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+            *art_in, "-map", "0:a:0", "-c:a", "copy", *art_out,
+            *_build_metadata_args(metadata, "m4a"), output_path,
+        ]
+        _run_ffmpeg(cmd, input_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _build_simple_cmd(

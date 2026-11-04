@@ -198,6 +198,7 @@ To build locally, run `tools/build_macos_app.sh` on a Mac, or `tools/build_windo
 | `--format` | mp3 | Output audio format (`mp3`, `m4a`, `flac`, `wav`) |
 | `--workers`, `-w` | half CPU count | Parallel encode workers |
 | `--mp3-bitrate` | 256 | MP3 bitrate (kbps) |
+| `--no-stream-copy` | off | m4a: always re-encode, even when the source is already stereo AAC |
 | `--fingerprint` / `--no-fingerprint` | on | Enable/disable fingerprinting |
 | `--fingerprint-search-window` | 300 | Search window from start/end |
 | `--cut-margin SECONDS` | 0.5 | Seconds given back on every detected cut so a slightly-off boundary keeps a little theme instead of losing dialogue |
@@ -222,6 +223,7 @@ Example:
     "min_silence_len": 0.5,
     "fingerprint_search_window": 300.0,
     "cut_margin": 0.5,
+    "stream_copy": true,
     "timestamps": {
         "s01e01.mp4": { "intro_end": 88.5, "outro_start": 2610.0 }
     }
@@ -252,7 +254,8 @@ The run summary includes:
 - One MP3 per input file in `--output-dir`.
 - Auto metadata from folder/filename patterns.
 - Log file saved to output directory by default.
-- `--format m4a` uses Apple's AudioToolbox encoder (`aac_at`) when available, which is much faster than ffmpeg's software AAC.
+- `--format m4a` copies the source audio without re-encoding when it is already stereo AAC at or below `--bitrate` (or its bitrate is unknown, as is usual in mkv). That takes seconds per episode instead of a full encode, and adds no generation loss. Cuts land on an AAC frame boundary (about 21 ms). Turn it off with `--no-stream-copy` or `"stream_copy": false`.
+- Other m4a sources (5.1, AC-3, higher bitrate) are encoded with Apple's AudioToolbox encoder (`aac_at`) when available, which is much faster than ffmpeg's software AAC.
 
 ## Development
 

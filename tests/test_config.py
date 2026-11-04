@@ -197,3 +197,13 @@ def test_build_config_file_fills_missing():
     cfg = build_config(args, file_data)
     assert cfg.mp3_bitrate == 128
     assert cfg.intro_duration == 45.0
+
+
+def test_stream_copy_defaults_on_and_file_or_cli_turns_it_off(tmp_path):
+    assert build_config(_FakeArgs(), {}).stream_copy is True
+    assert build_config(_FakeArgs(), {"stream_copy": False}).stream_copy is False
+    assert build_config(_FakeArgs(stream_copy=False), {"stream_copy": True}).stream_copy is False
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"stream_copy": "no"}))
+    with pytest.raises(ValueError, match="stream_copy"):
+        load_config(str(cfg_file))

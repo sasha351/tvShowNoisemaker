@@ -160,6 +160,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Encoding bitrate in kbps for mp3/m4a (default: 256).",
     )
 
+    parser.add_argument(
+        "--no-stream-copy",
+        dest="stream_copy",
+        action="store_const",
+        const=False,
+        default=None,
+        help="m4a: always re-encode. By default stereo AAC sources are copied without "
+             "re-encoding (much faster, no generation loss).",
+    )
+
     # Config file
     parser.add_argument(
         "--config", "-c",
@@ -169,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to a JSON config file.  CLI flags take precedence.  "
             "Supports keys: intro_duration, outro_duration, timestamps, "
             "mp3_bitrate, output_format, silence_db, min_silence_len, "
-            "fingerprint_search_window, cut_margin."
+            "fingerprint_search_window, cut_margin, stream_copy."
         ),
     )
 

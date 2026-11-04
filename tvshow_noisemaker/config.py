@@ -13,7 +13,8 @@ Supports a JSON config file with the following optional keys:
         "silence_db": -40.0,
         "min_silence_len": 0.5,
         "fingerprint_search_window": 300.0,
-        "cut_margin": 0.5
+        "cut_margin": 0.5,
+        "stream_copy": true
     }
 
 CLI flags always override config file values.
@@ -40,6 +41,7 @@ _VALID_KEYS = {
     "min_silence_len",
     "fingerprint_search_window",
     "cut_margin",
+    "stream_copy",
 }
 
 VALID_OUTPUT_FORMATS = {"mp3", "m4a", "flac", "wav"}
@@ -62,6 +64,8 @@ class Config:
     use_fingerprinting: bool = True
     log_file: Optional[str] = None
     workers: Optional[int] = None
+    # m4a only: copy stereo AAC sources instead of re-encoding them.
+    stream_copy: bool = True
 
 
 def load_config(config_path: Optional[str]) -> Dict[str, Any]:
@@ -120,6 +124,12 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
             )
         validated["output_format"] = val
 
+    if "stream_copy" in raw:
+        val = raw["stream_copy"]
+        if not isinstance(val, bool):
+            raise ValueError(f"Config key 'stream_copy' must be true or false, got {val!r}")
+        validated["stream_copy"] = val
+
     if "timestamps" in raw:
         ts = raw["timestamps"]
         if not isinstance(ts, dict):
@@ -177,6 +187,8 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         raise ValueError("cut_margin must be >= 0")
     timestamps = config_file_data.get("timestamps", {})
 
+    stream_copy = bool(_pick(getattr(args, "stream_copy", None), "stream_copy", True))
+
     workers_raw = getattr(args, "workers", None)
     workers = int(workers_raw) if workers_raw is not None else None
 
@@ -193,4 +205,5 @@ def build_config(args: Any, config_file_data: Dict[str, Any]) -> Config:
         use_fingerprinting=getattr(args, "fingerprint", True),
         log_file=getattr(args, "log_file", None),
         workers=workers,
+        stream_copy=stream_copy,
     )
