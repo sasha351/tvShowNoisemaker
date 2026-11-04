@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from tvshow_noisemaker import ui
 from tvshow_noisemaker.config import Config
 from tvshow_noisemaker.pipeline import EpisodePlan, Plan, Summary, detect, encode
 from tvshow_noisemaker.processor import terminate_all
@@ -73,6 +74,17 @@ def format_eta(seconds: float) -> str:
     return f"~{minutes}m {secs}s left" if minutes else f"~{secs}s left"
 
 
+def _scroll_pane(parent, height: int) -> ctk.CTkScrollableFrame:
+    """A bordered scrollable card that really is *height* tall.
+
+    CTkScrollbar defaults to 200px and props the pane open past its requested height;
+    letting the scrollbar stretch to the canvas instead keeps the layout honest.
+    """
+    pane = ctk.CTkScrollableFrame(parent, height=height, border_width=1, corner_radius=12)
+    pane._scrollbar.configure(height=0)  # pylint: disable=protected-access
+    return pane
+
+
 @dataclass
 class _Batch:
     """Everything one run owns.  Workers are handed this and never touch ``App``.
@@ -110,14 +122,24 @@ class _Row:
     frame: "ctk.CTkFrame"
     skip_var: tk.BooleanVar
     entries: dict[str, "ctk.CTkEntry"] = field(default_factory=dict)
+    strip: "ui.CutStrip | None" = None
 
 
 class App:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         root.title("TV Show Noisemaker")
-        root.geometry("640x760")
+        root.geometry("680x840")
+        root.minsize(600, 640)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        mono = ui.mono_family(root)
+        self.font = {
+            "body": ctk.CTkFont(size=13),
+            "small": ctk.CTkFont(size=12),
+            "title": ctk.CTkFont(size=15),
+            "mono": ctk.CTkFont(family=mono, size=13),
+            "mono_small": ctk.CTkFont(family=mono, size=12),
+        }
 
         self.batch = _Batch(id=0)
         self.player = SnippetPlayer()
@@ -142,23 +164,18 @@ class App:
         self._review_shown = False
         self._dst, self._review_all = "", False
 
-        frm = ctk.CTkFrame(root, fg_color="transparent")
-        frm.pack(fill="both", expand=True, padx=20, pady=20)
+        frm = ctk.CTkFrame(root, fg_color="transparent", corner_radius=0)
+        frm.pack(fill="both", expand=True, padx=ui.PAGE, pady=ui.PAGE)
 
         self.dst = tk.StringVar(value=str(Path.home() / "Downloads"))
+        # Footer first: pack hands out space in packing order, so the Start button is never
+        # the widget squeezed off-screen when the review panel opens on a short window.
+        self._footer(frm)
         self._shows_section(frm)
-        self._destination_row(frm)
-        self._options_row(frm)
+        self._settings(frm)
         self._status_card(frm)
         self._activity_feed(frm)
         self._review_panel(frm)
-
-        self.start_btn = ctk.CTkButton(
-            frm, text="Start", height=40, command=self._start_or_cancel
-        )
-        self.start_btn.pack(fill="x", pady=(12, 6))
-
-        self._details_toggle(frm)
 
         self.dst.trace_add("write", self._update_start_state)
         self._update_start_state()
@@ -170,42 +187,48 @@ class App:
 
     # -- Shows -----------------------------------------------------------
 
-    def _shows_section(self, parent: ctk.CTkFrame) -> None:
-        ctk.CTkLabel(
-            parent, text="Shows", font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=("gray40", "gray60"), anchor="w",
-        ).pack(fill="x")
-        self.src_frame = ctk.CTkScrollableFrame(parent, height=110)
-        self.src_frame.pack(fill="x", pady=(4, 4))
-        self.add_folder_btn = ctk.CTkButton(
-            parent, text="＋ Add Folders…", fg_color="transparent", border_width=1,
-            text_color=("gray10", "gray90"), command=self._add_source_folder,
+    def _section_label(self, parent, text: str) -> ctk.CTkLabel:
+        return ctk.CTkLabel(
+            parent, text=text, font=self.font["small"], text_color=ui.MUTED, anchor="w", height=20,
         )
-        self.add_folder_btn.pack(fill="x", pady=(0, 12))
+
+    def _shows_section(self, parent: ctk.CTkFrame) -> None:
+        head = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        head.pack(fill="x")
+        self._section_label(head, "Shows").pack(side="left")
+        self.add_folder_btn = ctk.CTkButton(
+            head, text="Add folders…", width=0, height=28, font=self.font["body"],
+            command=self._add_source_folder,
+        )
+        self.add_folder_btn.pack(side="right")
+        self.src_frame = _scroll_pane(parent, height=88)
+        self.src_frame.pack(fill="x", pady=(ui.STACK, ui.GROUP))
         self._render_source_rows()
 
     def _render_source_rows(self) -> None:
         for child in self.src_frame.winfo_children():
             child.destroy()
         self._folder_row_buttons = []
+        if not self.src_folders:
+            ctk.CTkLabel(
+                self.src_frame, text="No show folders yet. Each folder becomes one album.",
+                font=self.font["body"], text_color=ui.MUTED, anchor="w",
+            ).pack(fill="x", padx=8, pady=8)
+            return
         for folder in self.src_folders:
-            row = ctk.CTkFrame(self.src_frame, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            info = ctk.CTkFrame(row, fg_color="transparent")
+            row = ctk.CTkFrame(self.src_frame, fg_color="transparent", corner_radius=0)
+            row.pack(fill="x", padx=(8, 0), pady=4)
+            remove_btn = ui.IconButton(row, "remove", lambda f=folder: self._remove_folder(f), surface=ui.CARD)
+            remove_btn.pack(side="right")
+            info = ctk.CTkFrame(row, fg_color="transparent", corner_radius=0)
             info.pack(side="left", fill="x", expand=True)
             ctk.CTkLabel(
-                info, text=Path(folder).name, font=ctk.CTkFont(weight="bold"), anchor="w",
+                info, text=Path(folder).name, font=self.font["body"], anchor="w", height=20,
             ).pack(fill="x")
             ctk.CTkLabel(
-                info, text=folder, font=ctk.CTkFont(size=11),
-                text_color=("gray40", "gray60"), anchor="w",
+                info, text=str(Path(folder).parent), font=self.font["small"],
+                text_color=ui.MUTED, anchor="w", height=16,
             ).pack(fill="x")
-            remove_btn = ctk.CTkButton(
-                row, text="✕", width=28, height=28, fg_color="transparent",
-                text_color=("gray40", "gray60"), hover_color=("gray80", "gray30"),
-                command=lambda f=folder: self._remove_folder(f),
-            )
-            remove_btn.pack(side="right")
             self._folder_row_buttons.append(remove_btn)
 
     def _add_source_folder(self) -> None:
@@ -254,135 +277,192 @@ class App:
 
     # -- Destination & options --------------------------------------------
 
-    def _destination_row(self, parent: ctk.CTkFrame) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=2)
-        ctk.CTkLabel(row, text="Destination folder (audio):", width=180, anchor="w").pack(
-            side="left"
-        )
-        ctk.CTkEntry(row, textvariable=self.dst, state="readonly").pack(
-            side="left", fill="x", expand=True, padx=4
-        )
-        ctk.CTkButton(
-            row, text="Choose…", width=90,
-            command=lambda: self.dst.set(filedialog.askdirectory() or self.dst.get()),
-        ).pack(side="left")
+    def _settings(self, parent: ctk.CTkFrame) -> None:
+        """Two aligned rows: where audio goes, and how it is encoded."""
+        grid = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(1, weight=1)
 
-    def _options_row(self, parent: ctk.CTkFrame) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=(6, 2))
+        self._section_label(grid, "Save to").grid(row=0, column=0, sticky="w", padx=(0, 16))
+        ctk.CTkEntry(
+            grid, textvariable=self.dst, state="readonly", height=32, font=self.font["body"],
+        ).grid(row=0, column=1, sticky="ew")
+        ctk.CTkButton(
+            grid, text="Choose…", width=88, height=32, font=self.font["body"],
+            command=lambda: self.dst.set(filedialog.askdirectory() or self.dst.get()),
+        ).grid(row=0, column=2, padx=(ui.STACK, 0))
+
+        self._section_label(grid, "Format").grid(row=1, column=0, sticky="w", padx=(0, 16), pady=(ui.STACK, 0))
+        opts = ctk.CTkFrame(grid, fg_color="transparent", corner_radius=0)
+        opts.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(ui.STACK, 0))
 
         self.output_format = tk.StringVar(value="mp3")
-        ctk.CTkLabel(row, text="Format:").pack(side="left")
         ctk.CTkOptionMenu(
-            row, values=list(_FORMATS), variable=self.output_format, width=90,
-            command=self._on_format_change,
-        ).pack(side="left", padx=(4, 16))
+            opts, values=list(_FORMATS), variable=self.output_format, width=88, height=32,
+            font=self.font["body"], dropdown_font=self.font["body"], command=self._on_format_change,
+        ).pack(side="left")
 
         self.bitrate = tk.StringVar(value="256")
-        ctk.CTkLabel(row, text="Quality:").pack(side="left")
         self.quality_menu = ctk.CTkOptionMenu(
-            row, values=list(_BITRATES), variable=self.bitrate, width=90,
+            opts, values=list(_BITRATES), variable=self.bitrate, width=80, height=32,
+            font=self.font["body"], dropdown_font=self.font["body"],
         )
-        self.quality_menu.pack(side="left", padx=(4, 16))
+        self.quality_menu.pack(side="left", padx=(ui.STACK, 4))
+        self.quality_unit = ctk.CTkLabel(opts, text="kbps", font=self.font["body"], text_color=ui.TEXT_2)
+        self.quality_unit.pack(side="left")
 
         self.review_all = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row, text="Review every episode", variable=self.review_all).pack(side="left")
+        ctk.CTkCheckBox(
+            opts, text="Review every episode", variable=self.review_all, font=self.font["body"],
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="right")
 
     def _on_format_change(self, *_args) -> None:
         lossless = self.output_format.get() in _LOSSLESS_FORMATS
         self.quality_menu.configure(state="disabled" if lossless else "normal")
+        self.quality_unit.configure(text_color=ui.FAINT if lossless else ui.TEXT_2)
 
     # -- Status card, review panel & activity feed -------------------------
 
     def _status_card(self, parent: ctk.CTkFrame) -> None:
-        card = ctk.CTkFrame(parent, corner_radius=12)
-        card.pack(fill="x", pady=(12, 6))
+        card = ctk.CTkFrame(parent, border_width=1)
+        card.pack(fill="x", pady=(ui.GROUP, ui.STACK))
         self.status = ctk.CTkLabel(
-            card, text="Pick source and destination folders.",
-            font=ctk.CTkFont(size=15), anchor="w",
+            card, text="Add show folders to start", font=self.font["title"], anchor="w", height=20,
         )
-        self.status.pack(fill="x", padx=16, pady=(12, 8))
-        self.bar = ctk.CTkProgressBar(card)
-        self.bar.pack(fill="x", padx=16, pady=(0, 4))
+        self.status.pack(fill="x", padx=20, pady=(16, 12))
+        self.bar = ctk.CTkProgressBar(card, height=4)
+        self.bar.pack(fill="x", padx=20)
         self.bar.set(0)
         self.eta = ctk.CTkLabel(
-            card, text="", font=ctk.CTkFont(size=11), text_color=("gray40", "gray60"), anchor="w",
+            card, text="", font=self.font["small"], text_color=ui.MUTED, anchor="w", height=16,
         )
-        self.eta.pack(fill="x", padx=16, pady=(0, 12))
+        self.eta.pack(fill="x", padx=20, pady=(8, 12))
 
     def _review_panel(self, parent: ctk.CTkFrame) -> None:
-        self.review_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        ctk.CTkLabel(
-            self.review_frame, text="Needs review", font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=("gray40", "gray60"), anchor="w",
-        ).pack(fill="x")
-        self.review_list = ctk.CTkScrollableFrame(self.review_frame, height=180)
-        self.review_list.pack(fill="x", pady=(4, 4))
-        bar = ctk.CTkFrame(self.review_frame, fg_color="transparent")
+        self.review_frame = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        head = ctk.CTkFrame(self.review_frame, fg_color="transparent", corner_radius=0)
+        head.pack(fill="x")
+        self.review_title = self._section_label(head, "Needs review")
+        self.review_title.pack(side="left")
+        stop = ctk.CTkFrame(head, fg_color="transparent", corner_radius=0)
+        stop.pack(side="right")
+        ui.IconButton(stop, "stop", self.player.stop).pack(side="right")
+        self._section_label(stop, "Stop preview").pack(side="right", padx=(0, 4))
+        self.review_list = _scroll_pane(self.review_frame, height=196)
+        self.review_list.pack(fill="x", pady=ui.STACK)
+        bar = ctk.CTkFrame(self.review_frame, fg_color="transparent", corner_radius=0)
         bar.pack(fill="x")
-        ctk.CTkButton(bar, text="Approve all", width=100, command=self._approve_all).pack(side="left")
         ctk.CTkButton(
-            bar, text="Export approved cuts…", width=170, command=self._export_approved,
-        ).pack(side="left", padx=6)
-        ctk.CTkButton(bar, text="■", width=28, command=self.player.stop).pack(side="left")
+            bar, text="Approve all", width=0, height=32, font=self.font["body"], command=self._approve_all,
+        ).pack(side="left")
+        ctk.CTkButton(
+            bar, text="Export approved cuts…", width=0, height=32, font=self.font["body"],
+            command=self._export_approved,
+        ).pack(side="left", padx=ui.STACK)
 
     def _activity_feed(self, parent: ctk.CTkFrame) -> None:
-        self.activity = ctk.CTkTextbox(parent, state="disabled", wrap="word", height=140)
-        self.activity.pack(fill="both", expand=True)
-
-    def _details_toggle(self, parent: ctk.CTkFrame) -> None:
-        self.details_btn = ctk.CTkButton(
-            parent, text="Show details ▸", fg_color="transparent", anchor="w", height=24,
-            text_color=("gray30", "gray70"), hover_color=("gray90", "gray20"),
-            command=self._toggle_details,
+        self.activity = ctk.CTkTextbox(
+            parent, state="disabled", wrap="word", height=120, font=self.font["body"],
         )
-        self.details_btn.pack(fill="x")
-        self.details_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.activity.pack(fill="both", expand=True, pady=(12, 0))
+        self.activity.tag_config("failed", foreground=ui.NEGATIVE[1 if ctk.get_appearance_mode() == "Dark" else 0])
+
+    def _footer(self, parent: ctk.CTkFrame) -> None:
+        bar = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        bar.pack(side="bottom", fill="x", pady=(ui.GROUP, 0))
+        self.details_btn = ctk.CTkButton(
+            bar, text="Show log", width=0, height=32, border_width=0, fg_color="transparent",
+            text_color=ui.TEXT_2, font=self.font["body"], command=self._toggle_details,
+        )
+        self.details_btn.pack(side="left")
+        self.start_btn = ctk.CTkButton(
+            bar, text="Start", width=136, height=40, border_width=0, font=self.font["title"],
+            fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER, text_color=ui.ON_ACCENT,
+            text_color_disabled=ui.MUTED, command=self._start_or_cancel,
+        )
+        self.start_btn.pack(side="right")
+        # Packed above the footer when shown; side="bottom" stacks upward.
+        self.details_frame = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
         self.log = ctk.CTkTextbox(
-            self.details_frame, state="disabled", wrap="none", height=140,
-            font=("Menlo", 11),
+            self.details_frame, state="disabled", wrap="none", height=140, font=self.font["mono_small"],
         )
         self.log.pack(fill="both", expand=True)
 
     def _toggle_details(self) -> None:
         self._details_shown = not self._details_shown
         if self._details_shown:
-            self.details_frame.pack(fill="both", expand=True, pady=(4, 0))
-            self.details_btn.configure(text="Hide details ▾")
+            self.details_frame.pack(side="bottom", fill="x", pady=(ui.STACK, 0))
+            self.details_btn.configure(text="Hide log")
         else:
             self.details_frame.pack_forget()
-            self.details_btn.configure(text="Show details ▸")
+            self.details_btn.configure(text="Show log")
 
     # -- Review rows -------------------------------------------------------
 
     def _add_review_row(self, folder: str, ep: EpisodePlan) -> None:
-        frame = ctk.CTkFrame(self.review_list)
-        frame.pack(fill="x", pady=2)
-        row = _Row(folder=folder, episode=ep, frame=frame, skip_var=tk.BooleanVar(value=False))
-        ctk.CTkLabel(
-            frame, text=ep.basename, font=ctk.CTkFont(weight="bold"), anchor="w",
-        ).pack(fill="x", padx=8, pady=(6, 0))
-        ctk.CTkLabel(
-            frame, text="; ".join(ep.flags), font=ctk.CTkFont(size=11),
-            text_color=("gray40", "gray60"), anchor="w", justify="left", wraplength=420,
-        ).pack(fill="x", padx=8)
-        controls = ctk.CTkFrame(frame, fg_color="transparent")
-        controls.pack(fill="x", padx=8, pady=(2, 6))
-        for name, label in _FIELDS:
-            ctk.CTkButton(
-                controls, text="▶", width=28, command=lambda n=name: self._preview(row, n),
-            ).pack(side="left")
-            entry = ctk.CTkEntry(controls, width=70, placeholder_text=label)
+        # The row owns its separator, so dropping the row takes the hairline with it.
+        outer = ctk.CTkFrame(self.review_list, fg_color="transparent", corner_radius=0)
+        outer.pack(fill="x")
+        if self.review_rows:
+            ctk.CTkFrame(outer, height=1, fg_color=ui.HAIRLINE, corner_radius=0).pack(fill="x", padx=8)
+        frame = ctk.CTkFrame(outer, fg_color="transparent", corner_radius=0)
+        frame.pack(fill="x", padx=8, pady=12)
+        row = _Row(folder=folder, episode=ep, frame=outer, skip_var=tk.BooleanVar(value=False))
+        ctk.CTkLabel(frame, text=ep.basename, font=self.font["body"], anchor="w", height=20).pack(fill="x")
+        if ep.flags:
+            ctk.CTkLabel(
+                frame, text=" · ".join(ep.flags), font=self.font["small"], text_color=ui.TEXT_2,
+                anchor="w", justify="left", wraplength=520, height=16,
+            ).pack(fill="x")
+        row.strip = ui.CutStrip(frame)
+        row.strip.pack(fill="x", pady=(ui.STACK, ui.STACK))
+
+        controls = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
+        controls.pack(fill="x")
+        for col, (name, label) in enumerate(_FIELDS):
+            ctk.CTkLabel(
+                controls, text=label, font=self.font["small"], text_color=ui.MUTED, anchor="w", height=16,
+            ).grid(row=0, column=col, sticky="w", padx=(0, 16), pady=(0, 4))
+            cell = ctk.CTkFrame(controls, fg_color="transparent", corner_radius=0)
+            cell.grid(row=1, column=col, sticky="w", padx=(0, 16))
+            entry = ctk.CTkEntry(
+                cell, width=84, height=28, font=self.font["mono"], placeholder_text="m:ss.s",
+            )
             entry.insert(0, format_time(getattr(ep, name)))
-            entry.pack(side="left", padx=(2, 8))
+            entry.pack(side="left")
+            entry.bind("<KeyRelease>", lambda _e, r=row: self._refresh_strip(r), add="+")
+            ui.IconButton(cell, "play", lambda n=name, r=row: self._preview(r, n), surface=ui.CARD).pack(
+                side="left", padx=(4, 0),
+            )
             row.entries[name] = entry
-        ctk.CTkCheckBox(controls, text="Skip", variable=row.skip_var, width=60).pack(side="left")
-        ctk.CTkButton(controls, text="Approve", width=80, command=lambda: self._approve(row)).pack(side="right")
+        controls.grid_columnconfigure(len(_FIELDS), weight=1)
+        ctk.CTkButton(
+            controls, text="Approve", width=88, height=28, font=self.font["body"],
+            command=lambda: self._approve(row),
+        ).grid(row=1, column=len(_FIELDS) + 1, sticky="e")
+        ctk.CTkCheckBox(
+            controls, text="Skip", variable=row.skip_var, width=0, font=self.font["body"],
+            checkbox_width=18, checkbox_height=18, command=lambda: self._refresh_strip(row),
+        ).grid(row=1, column=len(_FIELDS), sticky="e", padx=(0, 12))
+        self._refresh_strip(row)
         self.review_rows.append(row)
+        self._update_review_title()
         if not self._review_shown:
-            self.review_frame.pack(fill="x", pady=(6, 6), before=self.activity)
+            self.review_frame.pack(fill="x", pady=(ui.STACK, 0), before=self.activity)
             self._review_shown = True
+
+    def _refresh_strip(self, row: _Row) -> None:
+        """Redraw a row's cut strip from whatever its time fields hold right now."""
+        def read(name: str):
+            try:
+                return parse_time(row.entries[name].get())
+            except (KeyError, ValueError):
+                return None
+        row.strip.show(
+            row.episode.duration, read("intro_start"), read("intro_end"), read("outro_start"),
+            skipped=bool(row.skip_var.get()),
+        )
 
     def _preview(self, row: _Row, name: str) -> None:
         try:
@@ -426,9 +506,13 @@ class App:
     def _drop_row(self, row: _Row) -> None:
         row.frame.destroy()
         self.review_rows.remove(row)
+        self._update_review_title()
         if not self.review_rows and self._review_shown:
             self.review_frame.pack_forget()
             self._review_shown = False
+
+    def _update_review_title(self) -> None:
+        self.review_title.configure(text=f"Needs review · {len(self.review_rows)}")
 
     def _clear_review(self) -> None:
         for row in list(self.review_rows):
@@ -610,7 +694,7 @@ class App:
             self._on_plan(msg[1], msg[2])
         elif kind == "detect_failed":
             folder, reason = msg[1], msg[2]
-            self._activity_append(f"✗ {Path(folder).name}: detection failed – {reason}")
+            self._activity_append(f"✗ {Path(folder).name}: detection failed – {reason}", failed=True)
         elif kind == "encoded":
             folder, summary = msg[1], msg[2]
             self._jobs_in_flight -= 1
@@ -618,7 +702,8 @@ class App:
                 reasons = "; ".join(f"{name}: {why}" for name, why in summary.failed)
                 self._activity_append(
                     f"{Path(folder).name}: {len(summary.converted)} converted, "
-                    f"{len(summary.failed)} failed – {reasons}"
+                    f"{len(summary.failed)} failed – {reasons}",
+                    failed=True,
                 )
             self._maybe_finish()
         elif kind == "detect_done":
@@ -640,7 +725,7 @@ class App:
         if self._enc_t0 is None:
             self._enc_t0 = time.monotonic()
         if text.startswith(("✓", "✗", "Cancelled")):
-            self._activity_append(text)
+            self._activity_append(text, failed=text.startswith("✗") and not text.startswith("✗ Skipped"))
             if not text.startswith("✗ Skipped"):
                 self._enc_done += 1
             self._update_eta()
@@ -666,8 +751,9 @@ class App:
     def _on_idle(self) -> None:
         self.running = False
         self._end_batch()
+        n = self._total_folders
         self.status.configure(
-            text="Cancelled." if self.cancelling else f"Done — {self._total_folders} folder(s) processed."
+            text="Cancelled" if self.cancelling else f"Done · {n} {'folder' if n == 1 else 'folders'} processed"
         )
         self.eta.configure(text="")
         self.bar.set(0)
@@ -691,9 +777,9 @@ class App:
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
-    def _activity_append(self, line: str) -> None:
+    def _activity_append(self, line: str, failed: bool = False) -> None:
         self.activity.configure(state="normal")
-        self.activity.insert("end", line + "\n")
+        self.activity.insert("end", line + "\n", ("failed",) if failed else ())
         self.activity.see("end")
         self.activity.configure(state="disabled")
 
@@ -712,7 +798,7 @@ class App:
 
 def main() -> None:
     ctk.set_appearance_mode("system")
-    ctk.set_default_color_theme("blue")
+    ui.apply_theme()
     root = ctk.CTk()
     App(root)
     root.mainloop()
