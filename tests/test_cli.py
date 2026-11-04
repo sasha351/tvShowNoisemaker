@@ -19,6 +19,15 @@ from tvshow_noisemaker.pipeline import default_encode_workers as _default_encode
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _ffmpeg_present():
+    """run() would otherwise download static ffmpeg on a machine without one (CI's Intel
+    runner), which can stall for minutes. These tests mock every ffmpeg call anyway."""
+    with patch("tvshow_noisemaker.cli._ensure_ffmpeg_on_path", return_value=True):
+        yield
+
+
+
 def _parse(args_str: str):
     parser = _build_parser()
     return parser.parse_args(args_str.split())
