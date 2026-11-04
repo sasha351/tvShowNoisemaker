@@ -2,6 +2,7 @@ name: Desktop apps
 
 # Pushing a vX.Y.Z tag (tools/release.sh does) builds the installers and publishes the GitHub
 # Release the installed apps update from: a .dmg per Mac CPU and a Setup.exe for Windows.
+# Each Mac CPU also gets a .zip of the app, the only thing 2.2.0's updater can install.
 # Changes to the packaging are build-checked on any branch.
 on:
   push:
@@ -95,10 +96,19 @@ jobs:
           codesign --verify --deep --strict "$app"
           sleep 5; pkill -f "$apps/TV Show Noisemaker.app" || true
 
+      - name: Legacy zip unpacks the way the 2.2.0 updater does it
+        run: |
+          out="$RUNNER_TEMP/legacy-zip"
+          ditto -x -k "dist/TV-Show-Noisemaker-macOS-${{ matrix.arch }}.zip" "$out"
+          [[ -d "$out/TV Show Noisemaker.app/Contents/MacOS" ]]
+          codesign --verify --deep --strict "$out/TV Show Noisemaker.app"
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
           if-no-files-found: error
 
   windows:

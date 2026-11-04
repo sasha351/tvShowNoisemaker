@@ -53,7 +53,7 @@ It never updates in the middle of a batch. To skip the check, launch with `TVSN_
 
 On Mac, if the app is in a folder your user cannot write to, the update fails with a message in the activity feed. Move the app to `/Applications` (as an admin user) or `~/Applications`.
 
-Mac apps on 2.2.0 look for a `.zip` in each release, and releases now only carry the `.dmg`. Reinstall once from the `.dmg` to get updates again.
+Mac apps on 2.2.0 update from a `.zip`, so every Mac release also carries `TV-Show-Noisemaker-macOS-<arch>.zip` for them. 2.3.0 and later use the `.dmg`. Don't download the `.zip` to install; use the `.dmg`.
 
 ## Install from source (CLI, development)
 

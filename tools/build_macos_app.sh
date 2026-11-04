@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the self-contained TV Show Noisemaker.app (Python, ffmpeg, ffprobe and fpcalc inside)
 # and its drag-to-Applications disk image, dist/TV-Show-Noisemaker-macOS-<arch>.dmg (what people
-# install and what the in-app updater downloads).
+# install and what the in-app updater downloads), plus dist/TV-Show-Noisemaker-macOS-<arch>.zip:
+# apps on 2.2.0 and older only update from that zip.
 # Run on a Mac from the repo root; CI runs it on every release tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,7 +16,7 @@ WORK="build/macos"
 TOOLS="$WORK/tools"
 FPCALC_VERSION="1.5.1"
 
-rm -rf "$WORK" "dist/$NAME.app" "dist/$NAME" "dist/$BASE.dmg"
+rm -rf "$WORK" "dist/$NAME.app" "dist/$NAME" "dist/$BASE".{zip,dmg}
 mkdir -p "$TOOLS"
 
 "$PY" -m pip install --quiet --upgrade pip
@@ -61,5 +62,9 @@ cp -R "$APP" "$DMG_DIR/"
 ln -s /Applications "$DMG_DIR/Applications"
 hdiutil create -quiet -volname "$NAME" -srcfolder "$DMG_DIR" -ov -format UDZO "dist/$BASE.dmg"
 
+# Legacy update asset: the 2.2.0 updater downloads this exact name and unpacks it with
+# `ditto -x -k`, expecting "$NAME.app" at the top. Drop it once nobody runs 2.2.0.
+ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$BASE.zip"
+
 echo "Built $APP ($VERSION, $ARCH)"
-ls -lh "dist/$BASE.dmg"
+ls -lh "dist/$BASE".{zip,dmg}
